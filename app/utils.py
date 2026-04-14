@@ -1,16 +1,14 @@
+import logging
 import re
 import sqlite3
-from logging import getLogger
 from pathlib import Path
 from subprocess import PIPE, run
 
 import duckdb
 
-from .config import quiet, tmp_dir
+from .config import GDAL_PARQUET_LCO, tmp_dir
 
-logger = getLogger(__name__)
-
-_PARQUET_OPTS = "(FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 15)"
+logger = logging.getLogger(__name__)
 
 
 def get_gpkg_layers(file: Path) -> list[str]:
@@ -57,7 +55,7 @@ def coverage_clean(input_path: str, output_path: str) -> None:
     """Topology cleanup using GDAL clean-coverage.
 
     Snaps shared boundaries and eliminates gaps/overlaps between polygons,
-    equivalent to PostGIS ST_CoverageClean(geom) OVER ().
+    equivalent to PostGIS ST_CoverageClean(geometry) OVER ().
     """
     result = run(
         [
@@ -66,11 +64,7 @@ def coverage_clean(input_path: str, output_path: str) -> None:
             "clean-coverage",
             input_path,
             output_path,
-            "--overwrite",
-            "--quiet",
-            "--lco=GEOMETRY_NAME=geom",
-            "--lco=COMPRESSION=ZSTD",
-            "--lco=COMPRESSION_LEVEL=15",
+            *GDAL_PARQUET_LCO,
         ],
         check=False,
         capture_output=True,
@@ -80,14 +74,21 @@ def coverage_clean(input_path: str, output_path: str) -> None:
         raise RuntimeError(msg)
 
 
+def cleanup_tmp(name: str) -> None:
+    """Remove all intermediate Parquet files for a given pipeline run."""
+    for p in tmp_dir.glob(f"{name}_*.parquet"):
+        p.unlink(missing_ok=True)
+
+
 def apply_funcs(name: str, file: Path, layer: str, *args: list) -> None:
     """Apply pipeline functions using a shared DuckDB connection."""
     tmp_dir.mkdir(exist_ok=True, parents=True)
+    cleanup_tmp(name)
     conn = get_connection()
-    total = len(args)
-    for i, func in enumerate(args, 1):
-        if not quiet:
-            step = func.__module__.split(".")[-1]
-            logger.info("%s: step %s/%s (%s)", name, i, total, step)
-        func(conn, name, file, layer)
-    conn.close()
+    try:
+        for func in args:
+            func(conn, name, file, layer)
+        logger.info("done: %s", name)
+    finally:
+        conn.close()
+        cleanup_tmp(name)

@@ -3,7 +3,8 @@ from subprocess import run
 
 import duckdb
 
-from .utils import _PARQUET_OPTS, coverage_clean, parquet
+from .config import GDAL_PARQUET_LCO, PARQUET_OPTS
+from .utils import parquet
 
 
 def main(
@@ -16,44 +17,40 @@ def main(
     """Import geodata into Parquet with topology cleaning."""
     attr_tmp = parquet(f"{name}_attr_tmp")
 
-    # Import to temp Parquet (all columns including geom)
+    # Import all columns (attributes only, no geometry processing needed here)
+    # fmt: off
     run(
         [
-            *["gdal", "vector", "convert"],
-            *[file, attr_tmp],
-            "--overwrite",
-            "--quiet",
-            f"--input-layer={layer}",
-            "--layer-creation-option=FID=fid",
-            "--layer-creation-option=GEOMETRY_NAME=geom",
-            "--layer-creation-option=COMPRESSION=ZSTD",
-            "--layer-creation-option=COMPRESSION_LEVEL=15",
+            "gdal", "vector", "convert",
+            str(file), f"--input-layer={layer}",
+            attr_tmp, "--layer-creation-option=FID=fid", *GDAL_PARQUET_LCO,
         ],
         check=True,
     )
+    # fmt: on
 
     # Write _attr: all attributes without geometry
-    conn.execute(f"""
+    conn.execute(f"""--sql
         COPY (
-            SELECT * EXCLUDE (geom)
+            SELECT * EXCLUDE (geometry)
             FROM read_parquet('{attr_tmp}')
-        ) TO '{parquet(f"{name}_attr")}' {_PARQUET_OPTS}
+        ) TO '{parquet(f"{name}_attr")}' {PARQUET_OPTS}
     """)
 
-    # Write _01_pre: force 2D, reproject to EPSG:4326, validate, force multi
-    pre = parquet(f"{name}_01_pre")
-    conn.execute(f"""
-        COPY (
-            SELECT
-                fid,
-                ST_Multi(ST_MakeValid(
-                    ST_Transform(ST_Force2D(geom), 'EPSG:4326')
-                )) AS geom
-            FROM read_parquet('{attr_tmp}')
-        ) TO '{pre}' {_PARQUET_OPTS}
-    """)
+    # Pipeline: fix geometry, force 2D + multi, clean topology
+    # fmt: off
+    run(
+        [
+            "gdal", "vector", "pipeline",
+            "read", attr_tmp,
+            "!", "make-valid",
+            "!", "reproject", "--dst-crs=EPSG:4326",
+            "!", "set-geom-type", "--multi", "--dim=XY",
+            "!", "clean-coverage",
+            "!", "write", "--layer-creation-option=FID=fid",
+            *GDAL_PARQUET_LCO, parquet(f"{name}_01"),
+        ],
+        check=True,
+    )
+    # fmt: on
     Path(attr_tmp).unlink()
-
-    # Coverage clean: snap shared boundaries, fill slivers
-    coverage_clean(pre, parquet(f"{name}_01"))
-    Path(pre).unlink()

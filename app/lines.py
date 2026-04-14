@@ -2,7 +2,8 @@ from pathlib import Path
 
 import duckdb
 
-from .utils import _PARQUET_OPTS, parquet
+from .config import PARQUET_OPTS
+from .utils import parquet
 
 
 def main(conn: duckdb.DuckDBPyConnection, name: str, *_: list) -> None:
@@ -14,40 +15,41 @@ def main(conn: duckdb.DuckDBPyConnection, name: str, *_: list) -> None:
     p02 = parquet(f"{name}_02")
 
     # Per-polygon boundary lines
-    conn.execute(f"""
+    conn.execute(f"""--sql
         COPY (
-            SELECT fid, ST_Multi(ST_Boundary(geom)) AS geom
+            SELECT fid, ST_Multi(ST_Boundary(geometry)) AS geometry
             FROM read_parquet('{p01}')
-        ) TO '{p02_tmp1}' {_PARQUET_OPTS}
+        ) TO '{p02_tmp1}' {PARQUET_OPTS}
     """)
 
     # Union of all boundaries (single row)
-    conn.execute(f"""
+    conn.execute(f"""--sql
         COPY (
-            SELECT ST_Multi(ST_Boundary(ST_Union_Agg(geom))) AS geom
+            SELECT ST_Multi(ST_Boundary(ST_Union_Agg(geometry))) AS geometry
             FROM read_parquet('{p01}')
-        ) TO '{p02_tmp2}' {_PARQUET_OPTS}
+        ) TO '{p02_tmp2}' {PARQUET_OPTS}
     """)
 
     # Intersect per-polygon boundaries with the total union boundary
-    conn.execute(f"""
+    conn.execute(f"""--sql
         COPY (
             SELECT
                 a.fid,
-                ST_Multi(ST_CollectionExtract(ST_Intersection(a.geom, b.geom), 2))
-                    AS geom
+                ST_Multi(ST_CollectionExtract(
+                    ST_Intersection(a.geometry, b.geometry), 2
+                )) AS geometry
             FROM read_parquet('{p02_tmp1}') AS a
             JOIN read_parquet('{p02_tmp2}') AS b
-            ON ST_Intersects(a.geom, b.geom)
-        ) TO '{p02_tmp3}' {_PARQUET_OPTS}
+            ON ST_Intersects(a.geometry, b.geometry)
+        ) TO '{p02_tmp3}' {PARQUET_OPTS}
     """)
 
     # Merge lines per polygon and dump into individual LineStrings
-    conn.execute(f"""
+    conn.execute(f"""--sql
         COPY (
-            SELECT fid, UNNEST(ST_Dump(ST_LineMerge(geom))).geom AS geom
+            SELECT fid, UNNEST(ST_Dump(ST_LineMerge(geometry))).geom AS geometry
             FROM read_parquet('{p02_tmp3}')
-        ) TO '{p02}' {_PARQUET_OPTS}
+        ) TO '{p02}' {PARQUET_OPTS}
     """)
 
     Path(p02_tmp1).unlink()

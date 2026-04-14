@@ -1,12 +1,13 @@
-from logging import getLogger
+import logging
 from pathlib import Path
 
 import duckdb
 
 from . import points, voronoi
-from .config import distance, quiet
+from .config import distance
+from .utils import cleanup_tmp
 
-logger = getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def main(
@@ -27,14 +28,11 @@ def main(
         try:
             points.main(conn, name, file, layer, d)
             voronoi.main(conn, name)
-            if not quiet and d > distance:
-                logger.info("done: %s", name)
-        except (RuntimeError, duckdb.Error):
-            if not quiet:
-                logger.exception("fail: %s --distance=%s", name, d)
+        except (RuntimeError, duckdb.Error) as e:
+            logger.warning("fail: %s --distance=%s: %s", name, d, e)
+            cleanup_tmp(name)
         else:
             return
     error = f"{name} did not succeed generating voronoi polygons"
-    if not quiet:
-        logger.error(error)
+    logger.error(error)
     raise RuntimeError(error)

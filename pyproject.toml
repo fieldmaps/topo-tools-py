@@ -3,15 +3,14 @@ name = "edge-extender"
 version = "0.2.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
-dependencies = ["duckdb", "psycopg[binary]", "python-dotenv"]
+requires-python = ">=3.12"
+dependencies = ["duckdb"]
 
 [dependency-groups]
 dev = ["pre-commit", "ruff", "taskipy"]
 
 [tool.taskipy.tasks]
 app = "python -m app"
-app_postgis = "python -m app_postgis"
 ruff = "ruff format && ruff check"
 
 [tool.ruff]

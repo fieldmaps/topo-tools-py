@@ -3,4 +3,5 @@ __pycache__
 .ruff_cache
 .venv
 .claude
+CLAUDE.md
 tmp/

@@ -3,7 +3,8 @@ from pathlib import Path
 
 import duckdb
 
-from .utils import _PARQUET_OPTS, parquet
+from .config import PARQUET_OPTS
+from .utils import parquet
 
 
 def main(
@@ -20,37 +21,39 @@ def main(
     d = float(distance)
 
     # Small buffer around all line endpoints to mark the shared-boundary zone
-    conn.execute(f"""
+    conn.execute(f"""--sql
         COPY (
-            SELECT ST_Multi(ST_Union_Agg(ST_Buffer(ST_Boundary(geom), 0.00000001)))
-                AS geom
+            SELECT ST_Multi(ST_Union_Agg(ST_Buffer(ST_Boundary(geometry), 0.00000001)))
+                AS geometry
             FROM read_parquet('{p02}')
-        ) TO '{p03_tmp1}' {_PARQUET_OPTS}
+        ) TO '{p03_tmp1}' {PARQUET_OPTS}
     """)
 
     # Interpolated points along each line minus the shared-boundary zone,
     # union'd with the line endpoints also minus the shared-boundary zone
-    conn.execute(f"""
+    conn.execute(f"""--sql
         COPY (
             SELECT
                 a.fid,
                 UNNEST(ST_Dump(ST_Difference(
                     ST_LineInterpolatePoints(
-                        a.geom,
-                        LEAST({d!r} / ST_Length(a.geom), 1.0),
+                        a.geometry,
+                        LEAST({d!r} / ST_Length(a.geometry), 1.0),
                         true
                     ),
-                    b.geom
-                ))).geom AS geom
+                    b.geometry
+                ))).geom AS geometry
             FROM read_parquet('{p02}') AS a
             CROSS JOIN read_parquet('{p03_tmp1}') AS b
             UNION ALL
             SELECT
                 a.fid,
-                UNNEST(ST_Dump(ST_Boundary(ST_Difference(a.geom, b.geom)))).geom AS geom
+                UNNEST(ST_Dump(ST_Boundary(
+                    ST_Difference(a.geometry, b.geometry)
+                ))).geom AS geometry
             FROM read_parquet('{p02}') AS a
             CROSS JOIN read_parquet('{p03_tmp1}') AS b
-        ) TO '{p03}' {_PARQUET_OPTS}
+        ) TO '{p03}' {PARQUET_OPTS}
     """)
 
     Path(p03_tmp1).unlink()

@@ -2,8 +2,9 @@ from pathlib import Path
 
 import duckdb
 
+from .config import PARQUET_OPTS
 from .topology import check_gaps, check_missing_rows, check_overlaps
-from .utils import _PARQUET_OPTS, coverage_clean, parquet
+from .utils import coverage_clean, parquet
 
 
 def main(conn: duckdb.DuckDBPyConnection, name: str, *_: list) -> None:
@@ -16,35 +17,35 @@ def main(conn: duckdb.DuckDBPyConnection, name: str, *_: list) -> None:
     p04 = parquet(f"{name}_04")
 
     # Voronoi diagram from all input points
-    conn.execute(f"""
+    conn.execute(f"""--sql
         COPY (
             SELECT UNNEST(ST_Dump(
                 ST_CollectionExtract(ST_MakeValid(
-                    ST_VoronoiDiagram(ST_Collect(list(geom)))
+                    ST_VoronoiDiagram(ST_Collect(list(geometry)))
                 ), 3)
-            )).geom AS geom
+            )).geom AS geometry
             FROM read_parquet('{p03}')
-        ) TO '{p04_tmp1}' {_PARQUET_OPTS}
+        ) TO '{p04_tmp1}' {PARQUET_OPTS}
     """)
 
     # Assign source fid to each Voronoi cell via point-in-polygon
-    conn.execute(f"""
+    conn.execute(f"""--sql
         COPY (
-            SELECT a.fid, b.geom
+            SELECT a.fid, b.geometry
             FROM read_parquet('{p03}') AS a
             JOIN read_parquet('{p04_tmp1}') AS b
-            ON ST_Within(a.geom, b.geom)
-        ) TO '{p04_tmp2}' {_PARQUET_OPTS}
+            ON ST_Within(a.geometry, b.geometry)
+        ) TO '{p04_tmp2}' {PARQUET_OPTS}
     """)
     check_missing_rows(conn, name, p03, p04_tmp2)
 
     # Union Voronoi cells by fid
-    conn.execute(f"""
+    conn.execute(f"""--sql
         COPY (
-            SELECT fid, ST_Multi(ST_Union_Agg(geom)) AS geom
+            SELECT fid, ST_Multi(ST_Union_Agg(geometry)) AS geometry
             FROM read_parquet('{p04_tmp2}')
             GROUP BY fid
-        ) TO '{p04_tmp3}' {_PARQUET_OPTS}
+        ) TO '{p04_tmp3}' {PARQUET_OPTS}
     """)
     check_overlaps(conn, name, p04_tmp3)
 
