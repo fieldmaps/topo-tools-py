@@ -1,8 +1,20 @@
 services:
   app:
     build: .
+    volumes:
+      - ./inputs:/srv/inputs
+      - ./outputs:/srv/outputs
+      - ./tmp:/srv/tmp
+    environment:
+      - TMP_DIR=/srv/tmp
+      - OUTPUT_DIR=/srv/outputs
+
+  app_postgis:
+    build:
+      context: .
+      dockerfile: Dockerfile.postgis
     sysctls:
       - net.ipv4.tcp_keepalive_time=200
     volumes:
       - ./inputs:/srv/inputs
-      - ./outputs:/srv/outputs
+      - ./outputs_postgis:/srv/outputs

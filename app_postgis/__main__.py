@@ -1,5 +1,5 @@
-from logging import getLogger
 from multiprocessing import Pool
+from venv import logger
 
 from . import attempt, cleanup, inputs, lines, merge, outputs
 from .config import (
@@ -13,14 +13,13 @@ from .config import (
 )
 from .utils import apply_funcs, get_gpkg_layers, is_polygon
 
-logger = getLogger(__name__)
 funcs = [inputs.main, lines.main, attempt.main, merge.main, outputs.main, cleanup.main]
 
 
 def main() -> None:
     """Run main function."""
     if not quiet:
-        logger.info("--distance=%s --num-threads=%s", distance, num_threads)
+        logger.info(f"--distance={distance} --num-threads={num_threads}")
     results = []
     pool = Pool(num_threads)
     files = [input_file] if input_file else sorted(input_dir.iterdir())

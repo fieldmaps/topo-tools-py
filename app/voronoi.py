@@ -1,118 +1,61 @@
-from typing import LiteralString
+from pathlib import Path
 
-from psycopg import Connection
-from psycopg.sql import SQL, Identifier
+import duckdb
 
 from .topology import check_gaps, check_missing_rows, check_overlaps
-
-query_1: LiteralString = """--sql
-    DROP TABLE IF EXISTS {table_out};
-    CREATE TABLE {table_out} AS
-    SELECT
-        (ST_Dump(
-            ST_CollectionExtract(ST_MakeValid(
-                ST_VoronoiPolygons(ST_Collect(geom))
-            ), 3)
-        )).geom::GEOMETRY(Polygon, 4326) AS geom
-    FROM {table_in};
-    CREATE INDEX ON {table_out} USING GIST(geom);
-"""
-query_2: LiteralString = """--sql
-    DROP TABLE IF EXISTS {table_out};
-    CREATE TABLE {table_out} AS
-    SELECT
-        a.fid,
-        b.geom
-    FROM {table_in1} AS a
-    JOIN {table_in2} AS b
-    ON ST_Within(a.geom, b.geom);
-"""
-query_3: LiteralString = """--sql
-    DROP TABLE IF EXISTS {table_out};
-    CREATE TABLE {table_out} AS
-    SELECT
-        fid,
-        ST_Multi(
-            ST_Union(geom)
-        )::GEOMETRY(MultiPolygon, 4326) AS geom
-    FROM {table_in}
-    GROUP BY fid;
-    CREATE INDEX ON {table_out} USING GIST(geom);
-"""
-query_4: LiteralString = """--sql
-    DROP TABLE IF EXISTS {table_out};
-    CREATE TABLE {table_out} AS
-    SELECT
-        fid,
-        ST_Multi(ST_MakeValid(
-            ST_CoverageClean(geom) OVER ()
-        ))::GEOMETRY(MultiPolygon, 4326) AS geom
-    FROM {table_in};
-    CREATE INDEX ON {table_out} USING GIST(geom);
-"""
-query_5: LiteralString = """--sql
-    DROP TABLE IF EXISTS {table_out} CASCADE;
-    CREATE TABLE {table_out} AS
-    SELECT
-        fid,
-        ST_Multi(
-            ST_CollectionExtract(ST_Intersection(
-                a.geom,
-                ST_MakeEnvelope(-180, -90, 180, 90, 4326)
-            ), 3)
-        )::GEOMETRY(MultiPolygon, 4326) AS geom
-    FROM {table_in} AS a;
-    CREATE INDEX ON {table_out} USING GIST(geom);
-"""
-drop_tmp: LiteralString = """--sql
-    DROP TABLE IF EXISTS {table_tmp1};
-    DROP TABLE IF EXISTS {table_tmp2};
-    DROP TABLE IF EXISTS {table_tmp3};
-    DROP TABLE IF EXISTS {table_tmp4};
-"""
+from .utils import _PARQUET_OPTS, coverage_clean, parquet
 
 
-def main(conn: Connection, name: str) -> None:
+def main(conn: duckdb.DuckDBPyConnection, name: str, *_: list) -> None:
     """Create Voronoi polygons from points."""
-    conn.execute(
-        SQL(query_1).format(
-            table_in=Identifier(f"{name}_03"),
-            table_out=Identifier(f"{name}_04_tmp1"),
-        ),
-    )
-    conn.execute(
-        SQL(query_2).format(
-            table_in1=Identifier(f"{name}_03"),
-            table_in2=Identifier(f"{name}_04_tmp1"),
-            table_out=Identifier(f"{name}_04_tmp2"),
-        ),
-    )
-    check_missing_rows(conn, name, f"{name}_03", f"{name}_04_tmp2")
-    conn.execute(
-        SQL(query_3).format(
-            table_in=Identifier(f"{name}_04_tmp2"),
-            table_out=Identifier(f"{name}_04_tmp3"),
-        ),
-    )
-    check_overlaps(conn, name, f"{name}_04_tmp3")
-    conn.execute(
-        SQL(query_4).format(
-            table_in=Identifier(f"{name}_04_tmp3"),
-            table_out=Identifier(f"{name}_04_tmp4"),
-        ),
-    )
-    check_gaps(conn, name, f"{name}_04_tmp4")
-    conn.execute(
-        SQL(query_4).format(
-            table_in=Identifier(f"{name}_04_tmp4"),
-            table_out=Identifier(f"{name}_04"),
-        ),
-    )
-    conn.execute(
-        SQL(drop_tmp).format(
-            table_tmp1=Identifier(f"{name}_04_tmp1"),
-            table_tmp2=Identifier(f"{name}_04_tmp2"),
-            table_tmp3=Identifier(f"{name}_04_tmp3"),
-            table_tmp4=Identifier(f"{name}_04_tmp4"),
-        ),
-    )
+    p03 = parquet(f"{name}_03")
+    p04_tmp1 = parquet(f"{name}_04_tmp1")
+    p04_tmp2 = parquet(f"{name}_04_tmp2")
+    p04_tmp3 = parquet(f"{name}_04_tmp3")
+    p04_tmp4 = parquet(f"{name}_04_tmp4")
+    p04 = parquet(f"{name}_04")
+
+    # Voronoi diagram from all input points
+    conn.execute(f"""
+        COPY (
+            SELECT UNNEST(ST_Dump(
+                ST_CollectionExtract(ST_MakeValid(
+                    ST_VoronoiDiagram(ST_Collect(list(geom)))
+                ), 3)
+            )).geom AS geom
+            FROM read_parquet('{p03}')
+        ) TO '{p04_tmp1}' {_PARQUET_OPTS}
+    """)
+
+    # Assign source fid to each Voronoi cell via point-in-polygon
+    conn.execute(f"""
+        COPY (
+            SELECT a.fid, b.geom
+            FROM read_parquet('{p03}') AS a
+            JOIN read_parquet('{p04_tmp1}') AS b
+            ON ST_Within(a.geom, b.geom)
+        ) TO '{p04_tmp2}' {_PARQUET_OPTS}
+    """)
+    check_missing_rows(conn, name, p03, p04_tmp2)
+
+    # Union Voronoi cells by fid
+    conn.execute(f"""
+        COPY (
+            SELECT fid, ST_Multi(ST_Union_Agg(geom)) AS geom
+            FROM read_parquet('{p04_tmp2}')
+            GROUP BY fid
+        ) TO '{p04_tmp3}' {_PARQUET_OPTS}
+    """)
+    check_overlaps(conn, name, p04_tmp3)
+
+    # Coverage clean pass 1
+    coverage_clean(p04_tmp3, p04_tmp4)
+    check_gaps(conn, name, p04_tmp4)
+
+    # Coverage clean pass 2
+    coverage_clean(p04_tmp4, p04)
+
+    Path(p04_tmp1).unlink()
+    Path(p04_tmp2).unlink()
+    Path(p04_tmp3).unlink()
+    Path(p04_tmp4).unlink()

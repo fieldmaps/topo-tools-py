@@ -1,15 +1,22 @@
 [project]
 name = "edge-extender"
-version = "0.1.0"
+version = "0.2.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = ["psycopg[binary,pool]", "python-dotenv"]
+dependencies = ["duckdb", "psycopg[binary]", "python-dotenv"]
 
 [dependency-groups]
 dev = ["pre-commit", "ruff", "taskipy"]
 
 [tool.taskipy.tasks]
 app = "python -m app"
-export = "uv sync -q && uv export -q -o requirements.txt --no-dev --no-hashes"
-ruff = "ruff format && ruff check && ruff format"
+app_postgis = "python -m app_postgis"
+ruff = "ruff format && ruff check"
+
+[tool.ruff]
+fix = true
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["COM812", "D100", "D203", "D213", "INP001", "S603", "S607", "S608"]

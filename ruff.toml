@@ -1,5 +1,0 @@
-fix = true
-
-[lint]
-select = ["ALL"]
-ignore = ["D100", "INP001", "S603", "S607"]

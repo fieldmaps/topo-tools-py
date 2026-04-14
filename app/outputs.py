@@ -1,40 +1,45 @@
+from logging import getLogger
 from pathlib import Path
 from subprocess import run
 from time import sleep
-from typing import LiteralString
-from venv import logger
 
-from psycopg import Connection
-from psycopg.sql import SQL, Identifier
+import duckdb
 
-from .config import dbname, output_dir, output_file, quiet
+from .config import output_dir, output_file, quiet
 from .topology import check_gaps, check_overlaps
+from .utils import _PARQUET_OPTS, parquet
 
-query_1: LiteralString = """--sql
-    DROP VIEW IF EXISTS {table_out};
-    CREATE VIEW {table_out} AS
-    SELECT
-        a.geom,
-        b.*
-    FROM {table_in1} AS a
-    LEFT JOIN {table_in2} AS b
-    ON a.fid = b.fid;
-"""
+logger = getLogger(__name__)
 
 
-def main(conn: Connection, name: str, file: Path, layer: str, *_: list) -> None:
+def main(
+    conn: duckdb.DuckDBPyConnection,
+    name: str,
+    file: Path,
+    layer: str,
+    *_: list,
+) -> None:
     """Output results to file."""
-    check_overlaps(conn, name, f"{name}_05")
-    check_gaps(conn, name, f"{name}_05")
-    conn.execute(
-        SQL(query_1).format(
-            table_in1=Identifier(f"{name}_05"),
-            table_in2=Identifier(f"{name}_attr"),
-            table_out=Identifier(f"{name}_06"),
-        ),
+    p05 = parquet(f"{name}_05")
+    p06 = parquet(f"{name}_06")
+
+    check_overlaps(conn, name, p05)
+    check_gaps(conn, name, p05)
+
+    # Materialize geometry joined with original attributes
+    conn.execute(f"""
+        COPY (
+            SELECT a.geom, b.* EXCLUDE (fid)
+            FROM read_parquet('{p05}') AS a
+            LEFT JOIN read_parquet('{parquet(f"{name}_attr")}') AS b
+            ON a.fid = b.fid
+        ) TO '{p06}' {_PARQUET_OPTS}
+    """)
+
+    shp_opts = (
+        ["--layer-creation-option=ENCODING=UTF-8"] if file.suffix == ".shp" else []
     )
-    shp = ["--layer-creation-option=ENCODING=UTF-8"] if file.suffix == ".shp" else []
-    parquet = (
+    parquet_opts = (
         [
             "--layer-creation-option=COMPRESSION_LEVEL=15",
             "--layer-creation-option=COMPRESSION=ZSTD",
@@ -43,17 +48,16 @@ def main(conn: Connection, name: str, file: Path, layer: str, *_: list) -> None:
         if file.suffix == ".parquet"
         else []
     )
-    output_path = output_file if output_file else output_dir / file.name
-    output_path.parent.mkdir(exist_ok=True, parents=True)
+    dest = output_file or output_dir / file.name
+    dest.parent.mkdir(exist_ok=True, parents=True)
     args = [
         *["gdal", "vector", "convert"],
-        *[f"PG:dbname={dbname}", output_path],
+        *[p06, dest],
         "--overwrite",
         "--quiet",
-        f"--input-layer={name}_06",
         f"--output-layer={layer}",
-        *shp,
-        *parquet,
+        *shp_opts,
+        *parquet_opts,
     ]
     success = False
     for retry in range(5):
@@ -64,8 +68,8 @@ def main(conn: Connection, name: str, file: Path, layer: str, *_: list) -> None:
         sleep(retry**2)
     if not success:
         if not quiet:
-            logger.error(f"output fail: {name}")
-        error = f"could not write to output {name}"
-        raise RuntimeError(error)
+            logger.error("output fail: %s", name)
+        msg = f"could not write to output {name}"
+        raise RuntimeError(msg)
     if not quiet:
-        logger.info(f"done: {name}")
+        logger.info("done: %s", name)

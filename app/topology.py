@@ -1,24 +1,25 @@
-from venv import logger
+from logging import getLogger
 
-from psycopg import Connection
-from psycopg.sql import SQL, Identifier
+import duckdb
 
 from .config import quiet
 
+logger = getLogger(__name__)
 
-def check_overlaps(conn: Connection, name: str, table: str) -> None:
-    """Check for overlaps in polygons."""
-    query = """--sql
-        SELECT EXISTS(
-            SELECT 1
-            FROM {table_in} a
-            JOIN {table_in} b
-            ON ST_Overlaps(a.geom, b.geom)
-            WHERE a.fid != b.fid
-        );
-    """
+
+def check_overlaps(conn: duckdb.DuckDBPyConnection, name: str, path: str) -> None:
+    """Check for overlapping polygons."""
     overlaps = (
-        conn.execute(SQL(query).format(table_in=Identifier(table))).fetchone() or [1]
+        conn.execute(f"""
+            SELECT EXISTS(
+                SELECT 1
+                FROM read_parquet('{path}') AS a
+                JOIN read_parquet('{path}') AS b
+                ON ST_Overlaps(a.geom, b.geom)
+                WHERE a.fid != b.fid
+            )
+        """).fetchone()
+        or [1]
     )[0]
     if overlaps:
         error = f"OVERLAPS: {name}"
@@ -27,14 +28,14 @@ def check_overlaps(conn: Connection, name: str, table: str) -> None:
         raise RuntimeError(error)
 
 
-def check_gaps(conn: Connection, name: str, table: str) -> None:
-    """Check for gaps in polygons."""
-    query = """--sql
-        SELECT ST_NumInteriorRings(ST_Union(geom))
-        FROM {table_in};
-    """
+def check_gaps(conn: duckdb.DuckDBPyConnection, name: str, path: str) -> None:
+    """Check for gaps in polygon coverage."""
     gaps = (
-        conn.execute(SQL(query).format(table_in=Identifier(table))).fetchone() or [0]
+        conn.execute(f"""
+            SELECT ST_NumInteriorRings(ST_Union_Agg(geom))
+            FROM read_parquet('{path}')
+        """).fetchone()
+        or [0]
     )[0] > 0
     if gaps:
         error = f"GAPS: {name}"
@@ -43,17 +44,18 @@ def check_gaps(conn: Connection, name: str, table: str) -> None:
         raise RuntimeError(error)
 
 
-def check_missing_rows(conn: Connection, name: str, table_1: str, table_2: str) -> None:
-    """Check for missing rows in tables."""
-    query = """--sql
-        SELECT count(*)
-        FROM {table_in};
-    """
+def check_missing_rows(
+    conn: duckdb.DuckDBPyConnection,
+    name: str,
+    path_1: str,
+    path_2: str,
+) -> None:
+    """Check that two tables have the same row count."""
     rows_1 = (
-        conn.execute(SQL(query).format(table_in=Identifier(table_1))).fetchone() or [0]
+        conn.execute(f"SELECT count(*) FROM read_parquet('{path_1}')").fetchone() or [0]
     )[0]
     rows_2 = (
-        conn.execute(SQL(query).format(table_in=Identifier(table_2))).fetchone() or [0]
+        conn.execute(f"SELECT count(*) FROM read_parquet('{path_2}')").fetchone() or [0]
     )[0]
     if rows_1 != rows_2:
         error = f"MISSING ROWS: {name}"
