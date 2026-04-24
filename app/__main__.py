@@ -1,3 +1,5 @@
+"""Entry point for edge-extender; discovers inputs and runs the pipeline in parallel."""
+
 import logging
 
 from . import attempt, inputs, lines, merge, outputs

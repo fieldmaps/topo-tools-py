@@ -1,3 +1,5 @@
+"""Joins geometry with original attributes and exports output via GDAL."""
+
 import logging
 from pathlib import Path
 from subprocess import run
@@ -26,21 +28,21 @@ def main(
     *_: list,
 ) -> None:
     """Output results to file."""
-    p05 = parquet(f"{name}_05")
-    p06 = parquet(f"{name}_06")
-
-    check_overlaps(conn, name, p05)
-    check_gaps(conn, name, p05)
+    check_overlaps(conn, name, f"{name}_05")
+    check_gaps(conn, name, f"{name}_05")
 
     # Materialize geometry joined with original attributes
     conn.execute(f"""--sql
-        COPY (
-            SELECT a.geometry, b.* EXCLUDE (fid)
-            FROM read_parquet('{p05}') AS a
-            LEFT JOIN read_parquet('{parquet(f"{name}_attr")}') AS b
-            ON a.fid = b.fid
-        ) TO '{p06}' {PARQUET_OPTS}
+        CREATE OR REPLACE TABLE "{name}_06" AS
+        SELECT a.geometry, b.* EXCLUDE (fid)
+        FROM "{name}_05" AS a
+        LEFT JOIN "{name}_attr" AS b
+        ON a.fid = b.fid
     """)
+
+    # Export to Parquet for GDAL
+    p06 = parquet(f"{name}_06")
+    conn.execute(f"COPY (SELECT * FROM \"{name}_06\") TO '{p06}' {PARQUET_OPTS}")
 
     shp_opts = GDAL_SHP_LCO if file.suffix == ".shp" else []
     parquet_opts = GDAL_PARQUET_LCO if file.suffix == ".parquet" else []
@@ -53,14 +55,17 @@ def main(
         *shp_opts,
         *parquet_opts,
     ]
-    success = False
-    for retry in range(5):
-        result = run(args, check=False, capture_output=True)
-        if result.returncode == 0:
-            success = True
-            break
-        sleep(retry**2)
-    if not success:
-        msg = f"could not write to output {name}"
-        logger.error(msg)
-        raise RuntimeError(msg)
+    try:
+        success = False
+        for retry in range(5):
+            result = run(args, check=False, capture_output=True)
+            if result.returncode == 0:
+                success = True
+                break
+            sleep(retry**2)
+        if not success:
+            msg = f"could not write to output {name}"
+            logger.error(msg)
+            raise RuntimeError(msg)
+    finally:
+        Path(p06).unlink(missing_ok=True)

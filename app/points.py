@@ -1,10 +1,9 @@
+"""Creates interpolated points along boundary lines at configurable intervals."""
+
 from decimal import Decimal
 from pathlib import Path
 
 import duckdb
-
-from .config import PARQUET_OPTS
-from .utils import parquet
 
 
 def main(
@@ -15,24 +14,21 @@ def main(
     distance: Decimal,
 ) -> None:
     """Create points along boundary lines."""
-    p02 = parquet(f"{name}_02")
-    p03_tmp1 = parquet(f"{name}_03_tmp1")
-    p03 = parquet(f"{name}_03")
     d = float(distance)
 
     # Small buffer around all line endpoints to mark the shared-boundary zone
     conn.execute(f"""--sql
-        COPY (
-            SELECT ST_Multi(ST_Union_Agg(ST_Buffer(ST_Boundary(geometry), 0.00000001)))
-                AS geometry
-            FROM read_parquet('{p02}')
-        ) TO '{p03_tmp1}' {PARQUET_OPTS}
+        CREATE OR REPLACE TABLE "{name}_03_tmp1" AS
+        SELECT ST_Multi(ST_Union_Agg(ST_Buffer(ST_Boundary(geometry), 0.00000001)))
+            AS geometry
+        FROM "{name}_02"
     """)
 
     # Interpolated points along each line minus the shared-boundary zone,
     # union'd with the line endpoints also minus the shared-boundary zone
     conn.execute(f"""--sql
-        COPY (
+        CREATE OR REPLACE TABLE "{name}_03" AS
+        SELECT fid, geometry FROM (
             SELECT
                 a.fid,
                 UNNEST(ST_Dump(ST_Difference(
@@ -43,17 +39,18 @@ def main(
                     ),
                     b.geometry
                 ))).geom AS geometry
-            FROM read_parquet('{p02}') AS a
-            CROSS JOIN read_parquet('{p03_tmp1}') AS b
+            FROM "{name}_02" AS a
+            CROSS JOIN "{name}_03_tmp1" AS b
             UNION ALL
             SELECT
                 a.fid,
                 UNNEST(ST_Dump(ST_Boundary(
                     ST_Difference(a.geometry, b.geometry)
                 ))).geom AS geometry
-            FROM read_parquet('{p02}') AS a
-            CROSS JOIN read_parquet('{p03_tmp1}') AS b
-        ) TO '{p03}' {PARQUET_OPTS}
+            FROM "{name}_02" AS a
+            CROSS JOIN "{name}_03_tmp1" AS b
+        )
+        WHERE geometry IS NOT NULL AND NOT ST_IsEmpty(geometry)
     """)
 
-    Path(p03_tmp1).unlink()
+    conn.execute(f'DROP TABLE IF EXISTS "{name}_03_tmp1"')

@@ -1,3 +1,5 @@
+"""Retries points + voronoi stages with doubling distance on failure."""
+
 import logging
 from pathlib import Path
 
@@ -5,7 +7,6 @@ import duckdb
 
 from . import points, voronoi
 from .config import distance
-from .utils import cleanup_tmp
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,6 @@ def main(
             voronoi.main(conn, name)
         except (RuntimeError, duckdb.Error) as e:
             logger.warning("fail: %s --distance=%s: %s", name, d, e)
-            cleanup_tmp(name)
         else:
             return
     error = f"{name} did not succeed generating voronoi polygons"

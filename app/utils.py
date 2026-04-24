@@ -1,3 +1,5 @@
+"""Shared utilities: DuckDB connection, coverage cleaning, and pipeline chaining."""
+
 import logging
 import re
 import sqlite3
@@ -6,7 +8,7 @@ from subprocess import PIPE, run
 
 import duckdb
 
-from .config import GDAL_PARQUET_LCO, tmp_dir
+from .config import GDAL_PARQUET_LCO, PARQUET_OPTS, tmp_dir
 
 logger = logging.getLogger(__name__)
 
@@ -37,12 +39,14 @@ def is_polygon(file: Path) -> bool:
     return bool(regex.search(str(result.stdout)))
 
 
-def get_connection() -> duckdb.DuckDBPyConnection:
-    """Create a DuckDB in-memory connection with the spatial extension loaded."""
-    conn = duckdb.connect()
+def get_connection(name: str) -> duckdb.DuckDBPyConnection:
+    """Create a file-backed DuckDB connection with the spatial extension loaded."""
+    conn = duckdb.connect(str(tmp_dir / f"{name}.duckdb"))
     conn.execute("LOAD spatial;")
     conn.execute("SET geometry_always_xy = true;")
     conn.execute("SET enable_progress_bar = false;")
+    conn.execute("SET preserve_insertion_order = false;")
+    conn.execute("SET threads = 4;")
     return conn
 
 
@@ -51,31 +55,43 @@ def parquet(name: str) -> str:
     return str(tmp_dir / f"{name}.parquet")
 
 
-def coverage_clean(input_path: str, output_path: str) -> None:
+def coverage_clean(
+    conn: duckdb.DuckDBPyConnection,
+    input_table: str,
+    output_table: str,
+) -> None:
     """Topology cleanup using GDAL clean-coverage.
 
     Snaps shared boundaries and eliminates gaps/overlaps between polygons,
     equivalent to PostGIS ST_CoverageClean(geometry) OVER ().
     """
-    result = run(
-        [
-            "gdal",
-            "vector",
-            "clean-coverage",
-            input_path,
-            output_path,
-            *GDAL_PARQUET_LCO,
-        ],
-        check=False,
-        capture_output=True,
+    in_path = parquet(f"_{input_table}")
+    out_path = parquet(f"_{output_table}")
+    conn.execute(
+        f"COPY (SELECT * FROM \"{input_table}\") TO '{in_path}' {PARQUET_OPTS}"
     )
-    if result.returncode != 0:
-        msg = f"coverage_clean failed: {result.stderr.decode()}"
-        raise RuntimeError(msg)
+    try:
+        result = run(
+            ["gdal", "vector", "clean-coverage", in_path, out_path, *GDAL_PARQUET_LCO],
+            check=False,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            msg = f"coverage_clean failed: {result.stderr.decode()}"
+            raise RuntimeError(msg)
+        conn.execute(
+            f'CREATE OR REPLACE TABLE "{output_table}" AS '
+            f"SELECT * FROM read_parquet('{out_path}')"
+        )
+    finally:
+        Path(in_path).unlink(missing_ok=True)
+        Path(out_path).unlink(missing_ok=True)
 
 
 def cleanup_tmp(name: str) -> None:
-    """Remove all intermediate Parquet files for a given pipeline run."""
+    """Remove the DuckDB file and any GDAL interop Parquet files for a pipeline run."""
+    for p in tmp_dir.glob(f"{name}.duckdb*"):
+        p.unlink(missing_ok=True)
     for p in tmp_dir.glob(f"{name}_*.parquet"):
         p.unlink(missing_ok=True)
 
@@ -84,7 +100,7 @@ def apply_funcs(name: str, file: Path, layer: str, *args: list) -> None:
     """Apply pipeline functions using a shared DuckDB connection."""
     tmp_dir.mkdir(exist_ok=True, parents=True)
     cleanup_tmp(name)
-    conn = get_connection()
+    conn = get_connection(name)
     try:
         for func in args:
             func(conn, name, file, layer)

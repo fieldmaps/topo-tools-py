@@ -1,57 +1,36 @@
-from pathlib import Path
+"""Extracts polygon boundary lines and retains per-polygon attributes."""
 
 import duckdb
-
-from .config import PARQUET_OPTS
-from .utils import parquet
 
 
 def main(conn: duckdb.DuckDBPyConnection, name: str, *_: list) -> None:
     """Create boundary lines from polygons."""
-    p01 = parquet(f"{name}_01")
-    p02_tmp1 = parquet(f"{name}_02_tmp1")
-    p02_tmp2 = parquet(f"{name}_02_tmp2")
-    p02_tmp3 = parquet(f"{name}_02_tmp3")
-    p02 = parquet(f"{name}_02")
-
     # Per-polygon boundary lines
     conn.execute(f"""--sql
-        COPY (
-            SELECT fid, ST_Multi(ST_Boundary(geometry)) AS geometry
-            FROM read_parquet('{p01}')
-        ) TO '{p02_tmp1}' {PARQUET_OPTS}
+        CREATE OR REPLACE TABLE "{name}_02_tmp1" AS
+        SELECT fid, ST_Multi(ST_Boundary(geometry)) AS geometry
+        FROM "{name}_01"
     """)
 
-    # Union of all boundaries (single row)
+    # Exterior edges = each polygon's boundary minus the union of touching
+    # neighbours' boundaries. The lateral join finds neighbours locally so
+    # there is no global ST_Union_Agg over all polygons in the dataset.
     conn.execute(f"""--sql
-        COPY (
-            SELECT ST_Multi(ST_Boundary(ST_Union_Agg(geometry))) AS geometry
-            FROM read_parquet('{p01}')
-        ) TO '{p02_tmp2}' {PARQUET_OPTS}
+        CREATE OR REPLACE TABLE "{name}_02" AS
+        SELECT
+            a.fid,
+            UNNEST(ST_Dump(ST_LineMerge(ST_CollectionExtract(
+                CASE WHEN sub.neighbor_union IS NOT NULL
+                    THEN ST_Difference(a.geometry, sub.neighbor_union)
+                    ELSE a.geometry
+                END, 2
+            )))).geom AS geometry
+        FROM "{name}_02_tmp1" AS a
+        LEFT JOIN LATERAL (
+            SELECT ST_Union_Agg(b.geometry) AS neighbor_union
+            FROM "{name}_02_tmp1" AS b
+            WHERE b.fid != a.fid AND ST_Intersects(a.geometry, b.geometry)
+        ) AS sub ON true
     """)
 
-    # Intersect per-polygon boundaries with the total union boundary
-    conn.execute(f"""--sql
-        COPY (
-            SELECT
-                a.fid,
-                ST_Multi(ST_CollectionExtract(
-                    ST_Intersection(a.geometry, b.geometry), 2
-                )) AS geometry
-            FROM read_parquet('{p02_tmp1}') AS a
-            JOIN read_parquet('{p02_tmp2}') AS b
-            ON ST_Intersects(a.geometry, b.geometry)
-        ) TO '{p02_tmp3}' {PARQUET_OPTS}
-    """)
-
-    # Merge lines per polygon and dump into individual LineStrings
-    conn.execute(f"""--sql
-        COPY (
-            SELECT fid, UNNEST(ST_Dump(ST_LineMerge(geometry))).geom AS geometry
-            FROM read_parquet('{p02_tmp3}')
-        ) TO '{p02}' {PARQUET_OPTS}
-    """)
-
-    Path(p02_tmp1).unlink()
-    Path(p02_tmp2).unlink()
-    Path(p02_tmp3).unlink()
+    conn.execute(f'DROP TABLE IF EXISTS "{name}_02_tmp1"')

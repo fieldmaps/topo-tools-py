@@ -1,62 +1,53 @@
-from pathlib import Path
+"""Generates Voronoi polygons from boundary points and clips to bounding extent."""
 
 import duckdb
 
-from .config import PARQUET_OPTS
 from .topology import check_gaps, check_missing_rows, check_overlaps
-from .utils import coverage_clean, parquet
+from .utils import coverage_clean
 
 
 def main(conn: duckdb.DuckDBPyConnection, name: str, *_: list) -> None:
     """Create Voronoi polygons from points."""
-    p03 = parquet(f"{name}_03")
-    p04_tmp1 = parquet(f"{name}_04_tmp1")
-    p04_tmp2 = parquet(f"{name}_04_tmp2")
-    p04_tmp3 = parquet(f"{name}_04_tmp3")
-    p04_tmp4 = parquet(f"{name}_04_tmp4")
-    p04 = parquet(f"{name}_04")
-
     # Voronoi diagram from all input points
     conn.execute(f"""--sql
-        COPY (
-            SELECT UNNEST(ST_Dump(
-                ST_CollectionExtract(ST_MakeValid(
-                    ST_VoronoiDiagram(ST_Collect(list(geometry)))
-                ), 3)
-            )).geom AS geometry
-            FROM read_parquet('{p03}')
-        ) TO '{p04_tmp1}' {PARQUET_OPTS}
+        CREATE OR REPLACE TABLE "{name}_04_tmp1" AS
+        SELECT UNNEST(ST_Dump(
+            ST_CollectionExtract(
+                ST_VoronoiDiagram(ST_Collect(list(geometry))), 3
+            )
+        )).geom AS geometry
+        FROM "{name}_03"
     """)
 
-    # Assign source fid to each Voronoi cell via point-in-polygon
+    # Assign source fid to each Voronoi cell via point-in-polygon.
+    # ST_Intersects (not ST_Within) handles generators that land exactly on a
+    # Voronoi cell boundary, which ST_Within would reject.
     conn.execute(f"""--sql
-        COPY (
-            SELECT a.fid, b.geometry
-            FROM read_parquet('{p03}') AS a
-            JOIN read_parquet('{p04_tmp1}') AS b
-            ON ST_Within(a.geometry, b.geometry)
-        ) TO '{p04_tmp2}' {PARQUET_OPTS}
+        CREATE OR REPLACE TABLE "{name}_04_tmp2" AS
+        SELECT a.fid, b.geometry
+        FROM "{name}_03" AS a
+        JOIN "{name}_04_tmp1" AS b
+        ON ST_Intersects(a.geometry, b.geometry)
     """)
-    check_missing_rows(conn, name, p03, p04_tmp2)
+    check_missing_rows(conn, name, f"{name}_03", f"{name}_04_tmp2")
 
     # Union Voronoi cells by fid
     conn.execute(f"""--sql
-        COPY (
-            SELECT fid, ST_Multi(ST_Union_Agg(geometry)) AS geometry
-            FROM read_parquet('{p04_tmp2}')
-            GROUP BY fid
-        ) TO '{p04_tmp3}' {PARQUET_OPTS}
+        CREATE OR REPLACE TABLE "{name}_04_tmp3" AS
+        SELECT fid, ST_Multi(ST_Union_Agg(geometry)) AS geometry
+        FROM "{name}_04_tmp2"
+        GROUP BY fid
     """)
-    check_overlaps(conn, name, p04_tmp3)
+    check_overlaps(conn, name, f"{name}_04_tmp3")
 
     # Coverage clean pass 1
-    coverage_clean(p04_tmp3, p04_tmp4)
-    check_gaps(conn, name, p04_tmp4)
+    coverage_clean(conn, f"{name}_04_tmp3", f"{name}_04_tmp4")
+    check_gaps(conn, name, f"{name}_04_tmp4")
 
     # Coverage clean pass 2
-    coverage_clean(p04_tmp4, p04)
+    coverage_clean(conn, f"{name}_04_tmp4", f"{name}_04")
 
-    Path(p04_tmp1).unlink()
-    Path(p04_tmp2).unlink()
-    Path(p04_tmp3).unlink()
-    Path(p04_tmp4).unlink()
+    conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp1"')
+    conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp2"')
+    conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp3"')
+    conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp4"')

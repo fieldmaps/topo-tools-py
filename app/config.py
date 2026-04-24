@@ -1,3 +1,5 @@
+"""Parses CLI arguments and environment variables for pipeline configuration."""
+
 from argparse import ArgumentParser
 from decimal import Decimal
 from logging import INFO, basicConfig
@@ -39,8 +41,7 @@ overwrite = is_bool(args.overwrite)
 _parquet_opts = [
     "FORMAT PARQUET",
     "COMPRESSION ZSTD",
-    "COMPRESSION_LEVEL 15",
-    "GEOPARQUET_VERSION 'NONE'",
+    "GEOPARQUET_VERSION 'V2'",
 ]
 PARQUET_OPTS = f"({', '.join(_parquet_opts)})"
 
@@ -48,8 +49,7 @@ GDAL_PARQUET_LCO = [
     "--overwrite",
     "--quiet",
     "--layer-creation-option=GEOMETRY_NAME=geometry",
-    "--layer-creation-option=USE_PARQUET_GEO_TYPES=ONLY",
+    "--layer-creation-option=USE_PARQUET_GEO_TYPES=YES",
     "--layer-creation-option=COMPRESSION=ZSTD",
-    "--layer-creation-option=COMPRESSION_LEVEL=15",
 ]
 GDAL_SHP_LCO = ["--layer-creation-option=ENCODING=UTF-8"]
