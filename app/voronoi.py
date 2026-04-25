@@ -1,21 +1,21 @@
 """Generates Voronoi polygons from boundary points and clips to bounding extent."""
 
-import duckdb
+from duckdb import DuckDBPyConnection
 
 from .topology import check_gaps, check_missing_rows, check_overlaps
 from .utils import coverage_clean
 
 
-def main(conn: duckdb.DuckDBPyConnection, name: str, *_: list) -> None:
+def main(conn: DuckDBPyConnection, name: str) -> None:
     """Create Voronoi polygons from points."""
     # Voronoi diagram from all input points
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_04_tmp1" AS
         SELECT UNNEST(ST_Dump(
             ST_CollectionExtract(
-                ST_VoronoiDiagram(ST_Collect(list(geometry))), 3
+                ST_VoronoiDiagram(ST_Collect(list(geom))), 3
             )
-        )).geom AS geometry
+        )).geom AS geom
         FROM "{name}_03"
     """)
 
@@ -24,17 +24,17 @@ def main(conn: duckdb.DuckDBPyConnection, name: str, *_: list) -> None:
     # Voronoi cell boundary, which ST_Within would reject.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_04_tmp2" AS
-        SELECT a.fid, b.geometry
+        SELECT a.fid, b.geom
         FROM "{name}_03" AS a
         JOIN "{name}_04_tmp1" AS b
-        ON ST_Intersects(a.geometry, b.geometry)
+        ON ST_Intersects(a.geom, b.geom)
     """)
     check_missing_rows(conn, name, f"{name}_03", f"{name}_04_tmp2")
 
     # Union Voronoi cells by fid
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_04_tmp3" AS
-        SELECT fid, ST_Multi(ST_Union_Agg(geometry)) AS geometry
+        SELECT fid, ST_Multi(ST_Union_Agg(geom)) AS geom
         FROM "{name}_04_tmp2"
         GROUP BY fid
     """)

@@ -12,7 +12,7 @@ RUN apk add --no-cache \
         py3-duckdb \
         python3 && \
     python -m venv --system-site-packages /opt/venv && \
-    python -c "import duckdb; conn = duckdb.connect(); conn.execute('INSTALL spatial;')"
+    python -c "import duckdb; conn = duckdb.connect(); conn.execute('INSTALL spatial')"
 
 COPY app ./app
 

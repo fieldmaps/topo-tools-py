@@ -7,11 +7,7 @@ requires-python = ">=3.12"
 dependencies = ["duckdb"]
 
 [dependency-groups]
-dev = ["pre-commit", "ruff", "taskipy"]
-
-[tool.taskipy.tasks]
-app = "python -m app"
-ruff = "ruff format && ruff check"
+dev = ["pre-commit", "ruff"]
 
 [tool.ruff]
 fix = true

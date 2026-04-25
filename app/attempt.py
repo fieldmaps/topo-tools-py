@@ -1,23 +1,24 @@
 """Retries points + voronoi stages with doubling distance on failure."""
 
-import logging
+from logging import getLogger
 from pathlib import Path
 
-import duckdb
+from duckdb import DuckDBPyConnection
+from duckdb import Error as DuckDBError
 
 from . import points, voronoi
-from .config import distance
+from .config import MAX_POINTS, distance
 
-logger = logging.getLogger(__name__)
+logger = getLogger(__name__)
 
 
-def main(
-    conn: duckdb.DuckDBPyConnection,
-    name: str,
-    file: Path,
-    layer: str,
-    *_: list,
-) -> None:
+def _check_point_count(count: int) -> None:
+    if count > MAX_POINTS:
+        msg = f"too many points: {count:,}"
+        raise RuntimeError(msg)
+
+
+def main(conn: DuckDBPyConnection, name: str, file: Path, layer: str) -> None:
     """Try to generate Voronoi polygons with multiple distance thresholds.
 
     First try running with the default distance for points along a line.
@@ -28,8 +29,10 @@ def main(
     for d in [distance * 2**i for i in range(10)]:
         try:
             points.main(conn, name, file, layer, d)
+            count = conn.execute(f'SELECT count(*) FROM "{name}_03"').fetchall()[0][0]
+            _check_point_count(count)
             voronoi.main(conn, name)
-        except (RuntimeError, duckdb.Error) as e:
+        except (RuntimeError, DuckDBError) as e:
             logger.warning("fail: %s --distance=%s: %s", name, d, e)
         else:
             return

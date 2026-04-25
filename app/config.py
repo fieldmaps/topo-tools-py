@@ -32,24 +32,34 @@ args = parser.parse_args()
 
 distance = Decimal(args.distance)
 input_dir = Path(args.input_dir)
-input_file = Path(args.input_file) if args.input_file else None
+_input_file = Path(args.input_file) if args.input_file else None
+input_file = (
+    (_input_file if _input_file.is_absolute() else input_dir / _input_file)
+    if _input_file
+    else None
+)
 output_dir = Path(args.output_dir)
 output_file = Path(args.output_file) if args.output_file else None
 tmp_dir = Path(args.tmp_dir)
 overwrite = is_bool(args.overwrite)
 
-_parquet_opts = [
-    "FORMAT PARQUET",
-    "COMPRESSION ZSTD",
-    "GEOPARQUET_VERSION 'V2'",
-]
-PARQUET_OPTS = f"({', '.join(_parquet_opts)})"
+MAX_POINTS = 10_000_000
 
-GDAL_PARQUET_LCO = [
+PARQUET_OPTS = "(FORMAT PARQUET, COMPRESSION ZSTD, GEOPARQUET_VERSION 'V2')"
+_GDAL_PARQUET_BASE = [
     "--overwrite",
     "--quiet",
-    "--layer-creation-option=GEOMETRY_NAME=geometry",
     "--layer-creation-option=USE_PARQUET_GEO_TYPES=YES",
+    "--layer-creation-option=WRITE_COVERING_BBOX=NO",
     "--layer-creation-option=COMPRESSION=ZSTD",
+]
+GDAL_PARQUET_LCO = [
+    *_GDAL_PARQUET_BASE,
+    "--layer-creation-option=GEOMETRY_NAME=geom",
+]
+GDAL_PARQUET_EXPORT_LCO = [
+    *_GDAL_PARQUET_BASE,
+    "--layer-creation-option=GEOMETRY_NAME=geometry",
+    "--layer-creation-option=COMPRESSION_LEVEL=15",
 ]
 GDAL_SHP_LCO = ["--layer-creation-option=ENCODING=UTF-8"]

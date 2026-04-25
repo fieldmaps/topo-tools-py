@@ -35,7 +35,7 @@ The pipeline has 6 sequential stages, each a standalone module in `app/`. All st
 1. **`inputs.main`** — Imports geodata via GDAL, reprojects to EPSG:4326, snaps topology with `coverage_clean`, stores as Parquet (`*_attr`, `*_01`)
 2. **`lines.main`** — Extracts polygon boundary lines (`ST_Boundary`), unions them, then intersects to retain per-polygon attributes (`*_02`)
 3. **`attempt.main`** — Wrapper around `points.main` + `voronoi.main` that retries with doubling distance on failure (0.0002 → 0.1024, up to 10 attempts)
-4. **`points.main`** — Creates interpolated points along boundary lines at configurable intervals; excludes endpoints (`*_03`)
+4. **`points.main`** — Creates interpolated points along boundary lines at configurable intervals, excludes endpoints (`*_03`)
 5. **`voronoi.main`** — Generates Voronoi polygons from points (`ST_VoronoiDiagram`), clips to bounding extent (`*_04`)
 6. **`merge.main`** — Unions Voronoi extension outside original coverage with original polygons, applies `coverage_clean` (`*_05`)
 7. **`outputs.main`** — Joins geometry with original attributes, validates topology, exports via GDAL (up to 5 retries with backoff)
@@ -61,7 +61,7 @@ The pipeline has 6 sequential stages, each a standalone module in `app/`. All st
 
 - **DuckDB spatial extension** handles all geometry operations (`ST_*` functions). Connections are created per-process in `utils.py`.
 - **GDAL CLI** (`ogr2ogr`) is used for format I/O only — no geometry processing.
-- **Parquet as IPC** — intermediate stages write/read Parquet; no in-memory passing between stages.
+- **Parquet as IPC** — intermediate stages write/read Parquet, no in-memory passing between stages.
 - **Topology validation** in `topology.py` (`check_overlaps`, `check_gaps`, `check_missing_rows`) runs after merge before final output.
 - **Geometry column names**: `geom` in intermediate Parquet, `geometry` in final output.
 

@@ -1,14 +1,14 @@
 """Extracts polygon boundary lines and retains per-polygon attributes."""
 
-import duckdb
+from duckdb import DuckDBPyConnection
 
 
-def main(conn: duckdb.DuckDBPyConnection, name: str, *_: list) -> None:
+def main(conn: DuckDBPyConnection, name: str) -> None:
     """Create boundary lines from polygons."""
     # Per-polygon boundary lines
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_02_tmp1" AS
-        SELECT fid, ST_Multi(ST_Boundary(geometry)) AS geometry
+        SELECT fid, ST_Multi(ST_Boundary(geom)) AS geom
         FROM "{name}_01"
     """)
 
@@ -21,15 +21,15 @@ def main(conn: duckdb.DuckDBPyConnection, name: str, *_: list) -> None:
             a.fid,
             UNNEST(ST_Dump(ST_LineMerge(ST_CollectionExtract(
                 CASE WHEN sub.neighbor_union IS NOT NULL
-                    THEN ST_Difference(a.geometry, sub.neighbor_union)
-                    ELSE a.geometry
+                    THEN ST_Difference(a.geom, sub.neighbor_union)
+                    ELSE a.geom
                 END, 2
-            )))).geom AS geometry
+            )))).geom AS geom
         FROM "{name}_02_tmp1" AS a
         LEFT JOIN LATERAL (
-            SELECT ST_Union_Agg(b.geometry) AS neighbor_union
+            SELECT ST_Union_Agg(b.geom) AS neighbor_union
             FROM "{name}_02_tmp1" AS b
-            WHERE b.fid != a.fid AND ST_Intersects(a.geometry, b.geometry)
+            WHERE b.fid != a.fid AND ST_Intersects(a.geom, b.geom)
         ) AS sub ON true
     """)
 
