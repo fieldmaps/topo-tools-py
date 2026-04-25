@@ -1,50 +1,53 @@
-"""Unions Voronoi extensions with original polygons and cleans topology."""
+"""Unions Voronoi extensions with original polygons."""
 
 from duckdb import DuckDBPyConnection
-
-from .utils import coverage_clean
 
 
 def main(conn: DuckDBPyConnection, name: str) -> None:
     """Merge original geom with extended Voronoi polygons."""
-    # Voronoi extension clipped to outside original coverage.
-    # Per-cell lateral union avoids a global ST_Union_Agg over all original
-    # polygons, which OOMs for large/complex datasets.
+    # Node ALL boundaries together: original polygon boundaries and all Voronoi cell
+    # boundaries. This ensures every crossing point (where a Voronoi edge meets an
+    # original polygon edge) becomes a shared vertex in both geometries, so adjacent
+    # merged polygons always have consistent edge structure — no topology seams.
     conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_05_tmp1" AS
-        SELECT
-            a.fid,
-            ST_Multi(ST_MakeValid(
-                ST_Difference(a.geom, b.local_union)
-            )) AS geom
-        FROM "{name}_04" AS a
-        CROSS JOIN LATERAL (
-            SELECT ST_Union_Agg(c.geom) AS local_union
-            FROM "{name}_01" AS c
-            WHERE ST_Intersects(a.geom, c.geom)
-        ) AS b
-        WHERE b.local_union IS NOT NULL
+        CREATE OR REPLACE TABLE "{name}_05_noded" AS
+        WITH orig_bd AS (
+            SELECT ST_Union_Agg(ST_Boundary(geom)) AS geom FROM "{name}_01"
+        ),
+        voro_bd AS (
+            SELECT ST_Union_Agg(ST_Boundary(geom)) AS geom FROM "{name}_04"
+        )
+        SELECT ST_Node(ST_Collect(list(geom))) AS geom FROM (
+            SELECT geom FROM orig_bd
+            UNION ALL
+            SELECT geom FROM voro_bd
+        )
     """)
 
-    # Original polygons plus the Voronoi extension outside the original coverage
+    # Polygonize the noded edge network into all coverage pieces.
     conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_05_tmp2" AS
-        SELECT fid, geom FROM "{name}_01"
-        UNION ALL
-        SELECT fid, geom FROM "{name}_05_tmp1"
+        CREATE OR REPLACE TABLE "{name}_05_pieces" AS
+        SELECT UNNEST(ST_Dump(ST_Polygonize(list(geom)))).geom AS geom
+        FROM "{name}_05_noded"
     """)
 
-    # Re-union by fid to merge original + extended parts
+    # Assign each piece to a fid. Original polygon assignment takes priority so the
+    # original coverage is preserved exactly, even when Voronoi cells extend through it.
     conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_05_tmp3" AS
+        CREATE OR REPLACE TABLE "{name}_05_assigned" AS
+        SELECT COALESCE(o.fid, v.fid) AS fid, p.geom
+        FROM "{name}_05_pieces" AS p
+        LEFT JOIN "{name}_01" AS o ON ST_Within(ST_PointOnSurface(p.geom), o.geom)
+        LEFT JOIN "{name}_04" AS v ON ST_Within(ST_PointOnSurface(p.geom), v.geom)
+        WHERE COALESCE(o.fid, v.fid) IS NOT NULL
+    """)
+
+    conn.execute(f"""--sql
+        CREATE OR REPLACE TABLE "{name}_05" AS
         SELECT fid, ST_Multi(ST_Union_Agg(geom)) AS geom
-        FROM "{name}_05_tmp2"
+        FROM "{name}_05_assigned"
         GROUP BY fid
     """)
 
-    # Coverage clean
-    coverage_clean(conn, f"{name}_05_tmp3", f"{name}_05")
-
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp1"')
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp2"')
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp3"')
+    for tmp in ["05_noded", "05_pieces", "05_assigned"]:
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_{tmp}"')

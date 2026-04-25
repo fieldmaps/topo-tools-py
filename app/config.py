@@ -7,8 +7,7 @@ from os import environ, getenv
 from pathlib import Path
 
 
-def is_bool(string: str) -> bool:
-    """Convert string to boolean."""
+def _is_bool(string: str) -> bool:
     return string.upper() in ("YES", "ON", "TRUE", "1")
 
 
@@ -41,7 +40,9 @@ input_file = (
 output_dir = Path(args.output_dir)
 output_file = Path(args.output_file) if args.output_file else None
 tmp_dir = Path(args.tmp_dir)
-overwrite = is_bool(args.overwrite)
+overwrite = _is_bool(args.overwrite)
+
+FORMATS = [".shp", ".geojson", ".parquet", ".gpkg"]
 
 MAX_POINTS = 10_000_000
 
@@ -57,9 +58,12 @@ GDAL_PARQUET_LCO = [
     *_GDAL_PARQUET_BASE,
     "--layer-creation-option=GEOMETRY_NAME=geom",
 ]
-GDAL_PARQUET_EXPORT_LCO = [
-    *_GDAL_PARQUET_BASE,
-    "--layer-creation-option=GEOMETRY_NAME=geometry",
-    "--layer-creation-option=COMPRESSION_LEVEL=15",
-]
-GDAL_SHP_LCO = ["--layer-creation-option=ENCODING=UTF-8"]
+_PARQUET_EXPORT = (
+    "(FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 15, GEOPARQUET_VERSION 'V2')"
+)
+COPY_OPTS = {
+    ".parquet": _PARQUET_EXPORT,
+    ".gpkg": "WITH (FORMAT GDAL, DRIVER 'GPKG')",
+    ".geojson": "WITH (FORMAT GDAL, DRIVER 'GeoJSON')",
+    ".shp": "WITH (FORMAT GDAL, DRIVER 'ESRI Shapefile')",
+}

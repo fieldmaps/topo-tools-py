@@ -3,7 +3,6 @@
 from duckdb import DuckDBPyConnection
 
 from .topology import check_gaps, check_missing_rows, check_overlaps
-from .utils import coverage_clean
 
 
 def main(conn: DuckDBPyConnection, name: str) -> None:
@@ -29,25 +28,24 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         JOIN "{name}_04_tmp1" AS b
         ON ST_Intersects(a.geom, b.geom)
     """)
-    check_missing_rows(conn, name, f"{name}_03", f"{name}_04_tmp2")
+    check_missing_rows(conn, f"{name}_03", f"{name}_04_tmp2")
 
     # Union Voronoi cells by fid
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_04_tmp3" AS
-        SELECT fid, ST_Multi(ST_Union_Agg(geom)) AS geom
+        SELECT fid, ST_Union_Agg(geom) AS geom
         FROM "{name}_04_tmp2"
         GROUP BY fid
     """)
-    check_overlaps(conn, name, f"{name}_04_tmp3")
+    check_overlaps(conn, f"{name}_04_tmp3")
 
-    # Coverage clean pass 1
-    coverage_clean(conn, f"{name}_04_tmp3", f"{name}_04_tmp4")
-    check_gaps(conn, name, f"{name}_04_tmp4")
+    check_gaps(conn, f"{name}_04_tmp3")
 
-    # Coverage clean pass 2
-    coverage_clean(conn, f"{name}_04_tmp4", f"{name}_04")
+    conn.execute(f"""--sql
+        CREATE OR REPLACE TABLE "{name}_04" AS
+        SELECT * FROM "{name}_04_tmp3"
+    """)
 
     conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp1"')
     conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp2"')
     conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp3"')
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp4"')

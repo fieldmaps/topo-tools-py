@@ -8,7 +8,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     # Per-polygon boundary lines
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_02_tmp1" AS
-        SELECT fid, ST_Multi(ST_Boundary(geom)) AS geom
+        SELECT fid, ST_Boundary(geom) AS geom
         FROM "{name}_01"
     """)
 

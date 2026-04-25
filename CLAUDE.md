@@ -14,10 +14,9 @@ uv sync
 
 # Run the application
 uv run -m app
-task app
 
 # Format and lint
-task ruff   # runs: ruff format && ruff check
+uv run ruff format && uv run ruff check
 
 # Run with Docker
 docker build -t edge-extender .

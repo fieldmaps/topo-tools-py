@@ -3,8 +3,16 @@
 from logging import getLogger
 
 from . import attempt, inputs, lines, merge, outputs
-from .config import distance, input_dir, input_file, output_dir, overwrite, tmp_dir
-from .utils import cleanup_tmp, get_connection, get_gpkg_layers, is_polygon
+from .config import (
+    FORMATS,
+    distance,
+    input_dir,
+    input_file,
+    output_dir,
+    overwrite,
+    tmp_dir,
+)
+from .utils import cleanup_tmp, get_connection
 
 logger = getLogger(__name__)
 
@@ -13,35 +21,25 @@ def main() -> None:
     """Run main function."""
     logger.info("--distance=%s", distance)
     files = [input_file] if input_file else sorted(input_dir.iterdir())
-    for file in files:
-        if not overwrite and (output_dir / file.name).exists():
+    for path in files:
+        if not overwrite and (output_dir / path.name).exists():
             continue
-        layers = []
-        if (
-            file.is_file()
-            and file.suffix in [".shp", ".geojson", ".parquet"]
-            and is_polygon(file)
-        ):
-            layers = [(file.name.replace(".", "_"), file.stem)]
-        elif file.is_file() and file.suffix == ".gpkg":
-            layers = [
-                (f"{file.name.replace('.', '_')}_{layer}", layer)
-                for layer in get_gpkg_layers(file)
-            ]
-        for name, layer in layers:
-            tmp_dir.mkdir(exist_ok=True, parents=True)
+        if not path.is_file() or path.suffix not in FORMATS:
+            continue
+        name = path.name.replace(".", "_")
+        tmp_dir.mkdir(exist_ok=True, parents=True)
+        cleanup_tmp(name)
+        conn = get_connection(name)
+        try:
+            inputs.main(conn, name, path)
+            lines.main(conn, name)
+            attempt.main(conn, name)
+            merge.main(conn, name)
+            outputs.main(conn, name, path)
+            logger.info("done: %s", name)
+        finally:
+            conn.close()
             cleanup_tmp(name)
-            conn = get_connection(name)
-            try:
-                inputs.main(conn, name, file, layer)
-                lines.main(conn, name)
-                attempt.main(conn, name, file, layer)
-                merge.main(conn, name)
-                outputs.main(conn, name, file, layer)
-                logger.info("done: %s", name)
-            finally:
-                conn.close()
-                cleanup_tmp(name)
 
 
 if __name__ == "__main__":

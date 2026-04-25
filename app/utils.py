@@ -2,9 +2,7 @@
 
 from logging import getLogger
 from pathlib import Path
-from re import compile as re_compile
-from sqlite3 import connect as sqlite_connect
-from subprocess import PIPE, run
+from subprocess import run
 
 from duckdb import DuckDBPyConnection
 from duckdb import connect as duckdb_connect
@@ -12,32 +10,6 @@ from duckdb import connect as duckdb_connect
 from .config import GDAL_PARQUET_LCO, PARQUET_OPTS, tmp_dir
 
 logger = getLogger(__name__)
-
-
-def get_gpkg_layers(file: Path) -> list[str]:
-    """Get list of layers in GeoPackage."""
-    query = """--sql
-        SELECT table_name, geometry_type_name
-        FROM gpkg_geometry_columns
-        WHERE geometry_type_name IN ('POLYGON', 'MULTIPOLYGON', 'GEOMETRY')
-    """
-    con = sqlite_connect(file)
-    cur = con.cursor()
-    layers = sorted([row[0] for row in cur.execute(query)])
-    cur.close()
-    con.close()
-    return layers
-
-
-def is_polygon(file: Path) -> bool:
-    """Check if file is a polygon."""
-    regex = re_compile(r"\((?:Multi )?Polygon\)")
-    result = run(
-        ["gdal", "vector", "info", "--summary", file],
-        check=False,
-        stdout=PIPE,
-    )
-    return bool(regex.search(str(result.stdout)))
 
 
 def get_connection(name: str) -> DuckDBPyConnection:

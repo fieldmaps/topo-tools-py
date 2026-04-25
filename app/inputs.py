@@ -1,70 +1,56 @@
-"""Imports geodata via GDAL, reprojects to EPSG:4326, and stores as Parquet."""
+"""Imports geodata via DuckDB spatial, reprojects to EPSG:4326, and stores as tables."""
 
-from logging import getLogger
 from pathlib import Path
-from subprocess import CalledProcessError, run
 
 from duckdb import DuckDBPyConnection
 
-from .config import GDAL_PARQUET_LCO
-from .utils import parquet
 
-logger = getLogger(__name__)
-
-
-def main(conn: DuckDBPyConnection, name: str, file: Path, layer: str) -> None:
-    """Import geodata into DuckDB tables with topology cleaning."""
-    attr_tmp = parquet(f"{name}_attr_tmp")
-
-    # Import all columns (attributes only, no geometry processing needed here)
-    # fmt: off
-    run(
-        [
-            "gdal", "vector", "convert",
-            str(file), f"--input-layer={layer}",
-            attr_tmp, "--layer-creation-option=FID=fid", *GDAL_PARQUET_LCO,
-        ],
-        check=True,
+def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
+    """Import geodata into DuckDB tables."""
+    read_expr = (
+        f"SELECT * FROM '{path}'"
+        if path.suffix == ".parquet"
+        else f"SELECT * FROM ST_Read('{path}')"
     )
-    # fmt: on
 
-    # Write _attr table: all attributes without geometry
+    # Load once with stable fid; re-reading twice risks non-deterministic row ordering
     conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_attr" AS
-        SELECT * EXCLUDE (geom)
-        FROM '{attr_tmp}'
+        CREATE OR REPLACE TABLE "{name}_raw" AS
+        SELECT *, row_number() OVER () AS fid
+        FROM ({read_expr})
     """)
 
-    # Pipeline: fix geometry, force 2D + multi, clean topology
-    p01_tmp = parquet(f"{name}_01_tmp")
-    try:
-        # fmt: off
-        try:
-            run(
-                [
-                    "gdal", "vector", "pipeline",
-                    "read", attr_tmp,
-                    "!", "make-valid",
-                    "!", "reproject", "--dst-crs=EPSG:4326",
-                    "!", "set-geom-type", "--multi", "--dim=XY",
-                    "!", "clean-coverage",
-                    "!", "write", "--layer-creation-option=FID=fid",
-                    *GDAL_PARQUET_LCO, p01_tmp,
-                ],
-                check=True,
-            )
-        except CalledProcessError:
-            logger.warning(
-                "%s contains non-polygon geometries after make-valid, "
-                "source data has invalid features that cannot be topology-cleaned",
-                name,
-            )
-            raise
-        # fmt: on
-        conn.execute(f"""--sql
-            CREATE OR REPLACE TABLE "{name}_01" AS
-            SELECT * FROM '{p01_tmp}'
-        """)
-    finally:
-        Path(attr_tmp).unlink(missing_ok=True)
-        Path(p01_tmp).unlink(missing_ok=True)
+    schema = conn.execute(f'DESCRIBE "{name}_raw"').fetchall()
+    geom_col, geom_type = next(
+        (col[0], col[1]) for col in schema if col[1].startswith("GEOMETRY")
+    )
+    exclude_cols = [
+        col[0]
+        for col in schema
+        if col[1].startswith("GEOMETRY")
+        or (col[0].endswith("_bbox") and col[1].startswith("STRUCT"))
+    ]
+    exclude_sql = ", ".join(f'"{c}"' for c in exclude_cols)
+
+    conn.execute(f"""--sql
+        CREATE OR REPLACE TABLE "{name}_attr" AS
+        SELECT * EXCLUDE ({exclude_sql})
+        FROM "{name}_raw"
+    """)
+
+    # ST_Read tags geometry with source CRS; single-arg ST_Transform infers it.
+    # Parquet geometries are untagged (assumed EPSG:4326), so skip transform.
+    geom_expr = (
+        f"ST_Force2D(ST_Transform(ST_MakeValid(\"{geom_col}\"), 'EPSG:4326'))"
+        if geom_type != "GEOMETRY"
+        else f'ST_Force2D(ST_MakeValid("{geom_col}"))'
+    )
+
+    conn.execute(f"""--sql
+        CREATE OR REPLACE TABLE "{name}_01" AS
+        SELECT * EXCLUDE ({exclude_sql}),
+               {geom_expr} AS geom
+        FROM "{name}_raw"
+    """)
+
+    conn.execute(f'DROP TABLE "{name}_raw"')

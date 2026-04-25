@@ -1,21 +1,18 @@
 """Creates interpolated points along boundary lines at configurable intervals."""
 
 from decimal import Decimal
-from pathlib import Path
 
 from duckdb import DuckDBPyConnection
 
 
-def main(
-    conn: DuckDBPyConnection, name: str, __: Path, ___: str, distance: Decimal
-) -> None:
+def main(conn: DuckDBPyConnection, name: str, distance: Decimal) -> None:
     """Create points along boundary lines."""
     d = float(distance)
 
     # Small buffer around all line endpoints to mark the shared-boundary zone
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_03_tmp1" AS
-        SELECT ST_Multi(ST_Union_Agg(ST_Buffer(ST_Boundary(geom), 0.00000001)))
+        SELECT ST_Union_Agg(ST_Buffer(ST_Boundary(geom), 0.00000001))
             AS geom
         FROM "{name}_02"
     """)
