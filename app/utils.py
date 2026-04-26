@@ -1,13 +1,13 @@
-"""Shared utilities: DuckDB connection, coverage cleaning, and pipeline chaining."""
+"""Shared utilities: DuckDB connection and pipeline helpers."""
 
+from collections.abc import Generator
+from contextlib import contextmanager
 from logging import getLogger
-from pathlib import Path
-from subprocess import run
 
 from duckdb import DuckDBPyConnection
 from duckdb import connect as duckdb_connect
 
-from .config import GDAL_PARQUET_LCO, PARQUET_OPTS, tmp_dir
+from .config import num_threads, tmp_dir
 
 logger = getLogger(__name__)
 
@@ -19,7 +19,7 @@ def get_connection(name: str) -> DuckDBPyConnection:
     conn.execute("SET enable_progress_bar = false")
     conn.execute("SET geometry_always_xy = true")
     conn.execute("SET preserve_insertion_order = false")
-    conn.execute("SET threads = 4")
+    conn.execute(f"SET threads = {num_threads}")
     return conn
 
 
@@ -28,36 +28,20 @@ def parquet(name: str) -> str:
     return str(tmp_dir / f"{name}.parquet")
 
 
-def coverage_clean(
-    conn: DuckDBPyConnection,
-    input_table: str,
-    output_table: str,
-) -> None:
-    """Topology cleanup using GDAL clean-coverage.
+@contextmanager
+def spatial_join_memory(conn: DuckDBPyConnection) -> Generator[None, None, None]:
+    """Temporarily bypass DuckDB 1.5.2 SPATIAL_JOIN virtual-memory reservation.
 
-    Snaps shared boundaries and eliminates gaps/overlaps between polygons,
-    equivalent to PostGIS ST_CoverageClean(geometry) OVER ().
+    The SPATIAL_JOIN operator pre-allocates ~1x physical RAM as a virtual spill
+    reservation. Raising memory_limit above that threshold lets it proceed;
+    actual peak usage stays under 100 MB. See CLAUDE.md for full details.
     """
-    in_path = parquet(f"_{input_table}")
-    out_path = parquet(f"_{output_table}")
-    conn.execute(
-        f"COPY (SELECT * FROM \"{input_table}\") TO '{in_path}' {PARQUET_OPTS}"
-    )
+    orig = conn.execute("SELECT current_setting('memory_limit')").fetchone()[0]
+    conn.execute("SET memory_limit = '999GB'")
     try:
-        result = run(
-            ["gdal", "vector", "clean-coverage", in_path, out_path, *GDAL_PARQUET_LCO],
-            check=False,
-            capture_output=True,
-        )
-        if result.returncode != 0:
-            msg = f"coverage_clean failed: {result.stderr.decode()}"
-            raise RuntimeError(msg)
-        conn.execute(
-            f"CREATE OR REPLACE TABLE \"{output_table}\" AS SELECT * FROM '{out_path}'"
-        )
+        yield
     finally:
-        Path(in_path).unlink(missing_ok=True)
-        Path(out_path).unlink(missing_ok=True)
+        conn.execute(f"SET memory_limit = '{orig}'")
 
 
 def cleanup_tmp(name: str) -> None:

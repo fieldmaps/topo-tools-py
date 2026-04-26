@@ -49,21 +49,16 @@ def check_gaps(conn: DuckDBPyConnection, table: str) -> None:
     Runs both a strict interior-ring count and an area-based check, logs when
     they disagree, then raises on the area result (the authoritative one).
     """
-    strict = (
-        conn.execute(f"""--sql
-            SELECT ST_NumInteriorRings(ST_Union_Agg(geom))
+    strict_rings, gap_area = conn.execute(f"""--sql
+        WITH u AS (
+            SELECT ST_Union_Agg(geom) AS g, ST_Extent_Agg(geom) AS ext
             FROM "{table}"
-        """).fetchall()[0][0]
-        or 0
-    ) > 0
-
-    gap_area = (
-        conn.execute(f"""--sql
-            SELECT ST_Area(ST_Difference(ST_Extent_Agg(geom), ST_Union_Agg(geom)))
-            FROM "{table}"
-        """).fetchall()[0][0]
-        or 0.0
-    )
+        )
+        SELECT ST_NumInteriorRings(g), ST_Area(ST_Difference(ext, g))
+        FROM u
+    """).fetchone()
+    strict = (strict_rings or 0) > 0
+    gap_area = gap_area or 0.0
     area_based = gap_area > AREA_EPSILON
 
     if strict != area_based:

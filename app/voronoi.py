@@ -41,11 +41,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
 
     check_gaps(conn, f"{name}_04_tmp3")
 
-    conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_04" AS
-        SELECT * FROM "{name}_04_tmp3"
-    """)
+    conn.execute(f'ALTER TABLE "{name}_04_tmp3" RENAME TO "{name}_04"')
 
     conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp1"')
     conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp2"')
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp3"')
