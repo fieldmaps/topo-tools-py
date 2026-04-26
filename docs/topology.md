@@ -6,15 +6,15 @@ The pipeline previously called `gdal vector clean-coverage` (GEOS `GEOSCoverageS
 
 ### What DuckDB spatial exposes
 
-| Function | Purpose |
-|---|---|
-| `ST_CoverageInvalidEdges_Agg` | Detects edges that don't match between adjacent polygons (validation only, no repair) |
-| `ST_CoverageSimplify_Agg` | Topology-safe simplification (does not fix gaps or overlaps) |
-| `ST_CoverageUnion_Agg` | Fast union for already-valid coverages (crashes on invalid input) |
-| `ST_ReducePrecision` | Snaps vertices to a grid — makes edge mismatch worse when applied to only one layer |
-| `ST_Node` | Computes all intersection points between a collection of lines, adding them as shared vertices |
-| `ST_Polygonize` | Builds polygons from a planar noded edge network |
-| `ST_MemUnion_Agg` | Memory-efficient union aggregate |
+| Function                      | Purpose                                                                                        |
+| ----------------------------- | ---------------------------------------------------------------------------------------------- |
+| `ST_CoverageInvalidEdges_Agg` | Detects edges that don't match between adjacent polygons (validation only, no repair)          |
+| `ST_CoverageSimplify_Agg`     | Topology-safe simplification (does not fix gaps or overlaps)                                   |
+| `ST_CoverageUnion_Agg`        | Fast union for already-valid coverages (crashes on invalid input)                              |
+| `ST_ReducePrecision`          | Snaps vertices to a grid — makes edge mismatch worse when applied to only one layer            |
+| `ST_Node`                     | Computes all intersection points between a collection of lines, adding them as shared vertices |
+| `ST_Polygonize`               | Builds polygons from a planar noded edge network                                               |
+| `ST_MemUnion_Agg`             | Memory-efficient union aggregate                                                               |
 
 There is **no `ST_CoverageClean` or `ST_Snap`**. The GEOS coverage repair functions are not exposed.
 
@@ -40,10 +40,10 @@ This produces **0 gaps, 0 overlaps, 0 `ST_CoverageInvalidEdges`** on all tested 
 
 Both a **strict** and an **area-based** check are run and compared:
 
-| Check | Strict | Area-based (authoritative) |
-|---|---|---|
-| Overlaps | `ST_CoverageInvalidEdges_Agg IS NOT NULL` | `ST_Area(ST_Intersection) > 1e-10` |
-| Gaps | `ST_NumInteriorRings(ST_Union_Agg) > 0` | `ST_Area(ST_Difference(extent, union)) > 1e-10` |
+| Check    | Strict                                    | Area-based (authoritative)                      |
+| -------- | ----------------------------------------- | ----------------------------------------------- |
+| Overlaps | `ST_CoverageInvalidEdges_Agg IS NOT NULL` | `ST_Area(ST_Intersection) > 1e-10`              |
+| Gaps     | `ST_NumInteriorRings(ST_Union_Agg) > 0`   | `ST_Area(ST_Difference(extent, union)) > 1e-10` |
 
 When the two disagree, a `WARNING` is logged with both values. The run only fails on the area-based result. `AREA_EPSILON = 1e-10` (≈ 0.1 m²) is the threshold below which a discrepancy is treated as a floating-point artifact rather than a real topology error.
 

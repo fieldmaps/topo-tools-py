@@ -11,7 +11,7 @@ Machine: Apple Silicon, macOS, 4 physical cores. Measured with `/usr/bin/time -l
 ### Afghanistan admin2 (`afg_admin2_v01.parquet`)
 
 | Threads | Wall time | Peak RSS |
-|---------|-----------|----------|
+| ------- | --------- | -------- |
 | 1       | 2:14      | 3.47 GB  |
 | 2       | 2:00      | 3.49 GB  |
 | 4       | 2:02      | 3.52 GB  |
@@ -19,7 +19,7 @@ Machine: Apple Silicon, macOS, 4 physical cores. Measured with `/usr/bin/time -l
 ### Chile admin3 (`chl_admin3.parquet`)
 
 | Threads | Wall time | Peak RSS |
-|---------|-----------|----------|
+| ------- | --------- | -------- |
 | 1       | 7:09      | 8.41 GB  |
 | 2       | 6:42      | 9.26 GB  |
 | 4       | 6:06      | 10.05 GB |
@@ -38,14 +38,14 @@ Machine: Apple Silicon, macOS, 4 physical cores. Measured with `/usr/bin/time -l
 
 Memory and time breakdown for Chile admin3 at 4 threads (the stress test):
 
-| Phase | Module | Peak memory | Wall time | Main bottleneck |
-|-------|--------|-------------|-----------|-----------------|
-| Input | `inputs.py` | ~2× input size | Fast | I/O |
-| Lines | `lines.py` | Low (1D geometries) | Moderate | LATERAL join O(n × neighbors) |
-| Points | `points.py` | ~400 MB at 10M pts | Fast | Interpolation |
-| **Voronoi** | `voronoi.py` | **2–5 GB** | Slow | `ST_VoronoiDiagram` — GEOS, single-threaded |
-| **Merge** | `merge.py` | **500 MB – 1.5 GB** | **Longest** | `ST_Node` + `ST_Polygonize` — GEOS, single-threaded |
-| Outputs | `outputs.py` | 300 MB – 1 GB | Moderate | `ST_Union_Agg` in topology checks |
+| Phase       | Module       | Peak memory         | Wall time   | Main bottleneck                                     |
+| ----------- | ------------ | ------------------- | ----------- | --------------------------------------------------- |
+| Input       | `inputs.py`  | ~2× input size      | Fast        | I/O                                                 |
+| Lines       | `lines.py`   | Low (1D geometries) | Moderate    | LATERAL join O(n × neighbors)                       |
+| Points      | `points.py`  | ~400 MB at 10M pts  | Fast        | Interpolation                                       |
+| **Voronoi** | `voronoi.py` | **2–5 GB**          | Slow        | `ST_VoronoiDiagram` — GEOS, single-threaded         |
+| **Merge**   | `merge.py`   | **500 MB – 1.5 GB** | **Longest** | `ST_Node` + `ST_Polygonize` — GEOS, single-threaded |
+| Outputs     | `outputs.py` | 300 MB – 1 GB       | Moderate    | `ST_Union_Agg` in topology checks                   |
 
 **Voronoi** is the memory ceiling: `ST_VoronoiDiagram(ST_Collect(list(geom)))` materializes the entire point cloud as a single GEOS GeometryCollection before computing anything. For 10M points this is ~2–5 GB in GEOS heap — cannot be streamed or chunked. The retry/doubling-distance mechanism in `attempt.py` is the safety valve: it backs off from 10M points until the operation fits in available memory.
 
@@ -57,13 +57,13 @@ Memory and time breakdown for Chile admin3 at 4 threads (the stress test):
 
 ## `get_connection` settings
 
-| Setting | Effect |
-|---------|--------|
-| `LOAD spatial` | One-time extension load. No ongoing effect. |
-| `enable_progress_bar = false` | No memory or performance effect. Suppresses terminal noise. |
-| `geometry_always_xy = true` | No memory or performance effect. Correctness: forces (lon, lat) coordinate order regardless of CRS definition. Required for correct EPSG:4326 output. |
+| Setting                            | Effect                                                                                                                                                                                            |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LOAD spatial`                     | One-time extension load. No ongoing effect.                                                                                                                                                       |
+| `enable_progress_bar = false`      | No memory or performance effect. Suppresses terminal noise.                                                                                                                                       |
+| `geometry_always_xy = true`        | No memory or performance effect. Correctness: forces (lon, lat) coordinate order regardless of CRS definition. Required for correct EPSG:4326 output.                                             |
 | `preserve_insertion_order = false` | **Free win.** Removes sequence-tracking overhead from every intermediate buffer and eliminates the reorder pass after parallel aggregations. Workers emit chunks immediately rather than queuing. |
-| `threads = N` | Primary memory dial. Memory scales ~linearly with thread count. See benchmarks above. |
+| `threads = N`                      | Primary memory dial. Memory scales ~linearly with thread count. See benchmarks above.                                                                                                             |
 
 **`memory_limit` is unset** (defaults to 80% of system RAM). On a dev machine this is fine; in a Docker container DuckDB doesn't know it's constrained and will allocate freely until the OOM killer fires. For Docker, set `memory_limit` explicitly (e.g. `'1500MB'` in a 2 GB container) so DuckDB can spill to disk rather than crash.
 

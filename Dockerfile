@@ -1,17 +1,10 @@
-FROM alpine:edge
+FROM python:3.13-slim
 
 WORKDIR /srv
 
-ENV PATH="/opt/venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
 
-RUN apk add --no-cache \
-        -X https://dl-cdn.alpinelinux.org/alpine/edge/testing \
-        gdal-driver-parquet \
-        gdal-tools \
-        py3-duckdb \
-        python3 && \
-    python -m venv --system-site-packages /opt/venv && \
+RUN pip install --no-cache-dir duckdb==1.5.2 && \
     python -c "import duckdb; conn = duckdb.connect(); conn.execute('INSTALL spatial')"
 
 COPY app ./app
