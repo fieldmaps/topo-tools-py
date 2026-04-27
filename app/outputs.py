@@ -5,7 +5,7 @@ from pathlib import Path
 
 from duckdb import DuckDBPyConnection
 
-from .config import COPY_OPTS, output_dir, output_file
+from .config import COPY_OPTS, debug, output_dir, output_file
 from .topology import check_gaps, check_missing_rows, check_overlaps
 
 logger = getLogger(__name__)
@@ -32,3 +32,7 @@ def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
             FROM "{name}_05"
         ) TO '{dest}' {COPY_OPTS[path.suffix]}
     """)
+
+    if not debug:
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_05"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_01"')
