@@ -1,6 +1,7 @@
 """Shared utilities: DuckDB connection and pipeline helpers."""
 
 import re
+import threading
 import time
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -17,6 +18,7 @@ _GEO_PARQUET = (
     "(FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 15, GEOPARQUET_VERSION 'V2')"
 )
 _PARQUET = "(FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 15)"
+_MEM_Q = "SELECT COALESCE(SUM(memory_usage_bytes), 0) FROM duckdb_memory()"
 
 
 def _query_label(query: str) -> str:
@@ -57,8 +59,12 @@ class _EagerResult:
 class ProfiledConnection:
     """Proxy around DuckDBPyConnection; logs timing and memory delta per execute()."""
 
-    def __init__(self, conn: DuckDBPyConnection) -> None:  # noqa: D107
+    def __init__(self, conn: DuckDBPyConnection, db_path: str | None = None) -> None:  # noqa: D107
         self._conn = conn
+        # Second connection to the same file shares the buffer manager, allowing
+        # peak memory to be sampled from a background thread during query execution.
+        # Not available for in-memory databases (no file to connect to).
+        self._monitor = duckdb_connect(db_path) if db_path and profile else None
 
     def execute(self, query: str, parameters: list | None = None):  # noqa: ANN201
         """Log wall-clock time and duckdb_memory() delta, then forward."""
@@ -68,9 +74,24 @@ class ProfiledConnection:
                 if parameters is not None
                 else self._conn.execute(query)
             )
-        _mem_q = "SELECT COALESCE(SUM(memory_usage_bytes), 0) FROM duckdb_memory()"
         t0 = time.perf_counter()
-        before = self._conn.execute(_mem_q).fetchone()[0]
+        before = self._conn.execute(_MEM_Q).fetchone()[0]
+
+        peak = [before]
+        stop = threading.Event()
+
+        def _poll() -> None:
+            while not stop.is_set():
+                try:
+                    val = self._monitor.execute(_MEM_Q).fetchone()[0]
+                    peak[0] = max(peak[0], val)
+                except Exception:  # noqa: BLE001, S110
+                    pass
+                stop.wait(0.05)
+
+        if self._monitor:
+            threading.Thread(target=_poll, daemon=True).start()
+
         result = (
             self._conn.execute(query, parameters)
             if parameters is not None
@@ -79,18 +100,35 @@ class ProfiledConnection:
         # Materialize before the after-memory query, which would otherwise
         # invalidate the result cursor on the same connection.
         rows = result.fetchall()
-        after = self._conn.execute(_mem_q).fetchone()[0]
+
+        stop.set()
+        after = self._conn.execute(_MEM_Q).fetchone()[0]
+        peak[0] = max(peak[0], after)
+
         elapsed = time.perf_counter() - t0
-        logger.info(
-            "query %.3fs | %+.1f MB | %s",
-            elapsed,
-            (after - before) / 1e6,
-            _query_label(query),
-        )
+        if self._monitor:
+            logger.info(
+                "query %.3fs | %+.1f MB | %.1f MB total | %.1f MB peak | %s",
+                elapsed,
+                (after - before) / 1e6,
+                after / 1e6,
+                peak[0] / 1e6,
+                _query_label(query),
+            )
+        else:
+            logger.info(
+                "query %.3fs | %+.1f MB | %.1f MB total | %s",
+                elapsed,
+                (after - before) / 1e6,
+                after / 1e6,
+                _query_label(query),
+            )
         return _EagerResult(rows)
 
     def close(self) -> None:
         """Close the underlying connection."""
+        if self._monitor:
+            self._monitor.close()
         self._conn.close()
 
     def __getattr__(self, name: str) -> object:  # noqa: D105
@@ -99,17 +137,14 @@ class ProfiledConnection:
 
 def get_connection(name: str) -> ProfiledConnection:
     """Create a DuckDB connection (file-backed or in-memory) with spatial loaded."""
-    conn = (
-        duckdb_connect()
-        if in_memory
-        else duckdb_connect(str(tmp_dir / f"{name}.duckdb"))
-    )
+    db_path = None if in_memory else str(tmp_dir / f"{name}.duckdb")
+    conn = duckdb_connect() if db_path is None else duckdb_connect(db_path)
     conn.execute("LOAD spatial")
     conn.execute("SET enable_progress_bar = false")
     conn.execute("SET geometry_always_xy = true")
     conn.execute("SET preserve_insertion_order = false")
     conn.execute(f"SET threads = {num_threads}")
-    return ProfiledConnection(conn)
+    return ProfiledConnection(conn, db_path=db_path)
 
 
 @contextmanager
