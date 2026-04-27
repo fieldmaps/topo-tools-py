@@ -116,9 +116,13 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         )
         conn.execute(f"""--sql
             CREATE OR REPLACE TABLE "{name}_05" AS
-            WITH pts AS (
-                SELECT * EXCLUDE (geom), ST_PointOnSurface(geom) AS pt
+            WITH parts AS (
+                SELECT * EXCLUDE (geom), UNNEST(ST_Dump(geom)).geom AS part_geom
                 FROM "{name}_01"
+            ),
+            pts AS (
+                SELECT * EXCLUDE (part_geom), ST_PointOnSurface(part_geom) AS pt
+                FROM parts
             )
             SELECT p.* EXCLUDE (pt), ST_Multi(ST_Union_Agg(v.geom)) AS geom
             FROM "{name}_05_tmp3" AS v
