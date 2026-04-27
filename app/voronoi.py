@@ -45,3 +45,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
 
     conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp1"')
     conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp2"')
+
+    # _03 has no readers past this stage; release it before merge starts.
+    conn.execute(f'DROP TABLE IF EXISTS "{name}_03"')
+    conn.execute("CHECKPOINT")
