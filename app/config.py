@@ -49,6 +49,7 @@ debug = _is_bool(args.debug)
 FORMATS = [".shp", ".geojson", ".parquet", ".gpkg"]
 
 MAX_POINTS = 10_000_000
+SNAP_TOLERANCE = 0.00000001
 
 _PARQUET_EXPORT = (
     "(FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 15, GEOPARQUET_VERSION 'V2')"

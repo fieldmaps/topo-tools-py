@@ -41,8 +41,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     conn.execute(f'ALTER TABLE "{name}_04_tmp3" RENAME TO "{name}_04"')
 
     if not debug:
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_03"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp1"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp2"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_02"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_03"')
     conn.execute("CHECKPOINT")

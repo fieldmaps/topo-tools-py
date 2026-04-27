@@ -49,6 +49,44 @@ When the two disagree, a `WARNING` is logged with both values. The run only fail
 
 ---
 
+## `_05_tmp2` Inner-Line Filtering
+
+`_05_tmp2` holds the Voronoi extension lines that are unioned with the original polygon boundaries in the final `ST_Node + ST_Polygonize` step. It must contain only lines in the **extension zone** (outside the original polygon union) — inner Voronoi lines (those running through the interior of the polygon union) must be removed, or they create spurious cells inside original polygons after polygonization.
+
+### Classification rule
+
+A section segment is **inner** if its representative point lies within any original polygon. It is **outer** otherwise. Segments whose middle briefly crosses a polygon boundary but whose endpoints are outside are treated as outer — this is an accepted edge case where the downstream polygonization handles any sliver gracefully.
+
+### `ST_PointOnSurface` is the right test
+
+`ST_PointOnSurface` on a linestring returns the **midpoint by length** (deterministic, not random, not the centroid). This is more robust than testing endpoints because:
+
+- **Narrow-notch edge case**: a V-shaped crack in the polygon boundary can cause one endpoint of an outer line to land inside the polygon, even though the line itself passes through the gap and is correctly an extension line. The midpoint lands in the exterior portion and the line is kept.
+- **Crossing-at-midpoint edge case**: a line whose middle crosses into a polygon at exactly the midpoint would be incorrectly removed, but this is rare and less harmful than removing real extension lines.
+
+### Final implementation
+
+```sql
+WHERE NOT EXISTS (
+    SELECT 1 FROM "{name}_01" p
+    WHERE ST_Within(ST_PointOnSurface(s.geom), p.geom)
+)
+```
+
+This replaces the original `ST_Union_Agg(geom) FROM _01` union approach. The union materialised a large merged polygon in memory — expensive and problematic for DuckDB-WASM and memory-limited Docker. The anti-join tests the midpoint against individual polygon rows, allowing DuckDB to short-circuit as soon as one containing polygon is found.
+
+### Approaches ruled out
+
+| Approach | Reason rejected |
+| --- | --- |
+| `ST_Union_Agg(_01)` | Materialises large intermediate geometry; expensive in WASM/Docker |
+| `ST_ConvexHull(_01)` | Fast but incorrect for concave geographies (e.g. Chile coastline) |
+| `ST_Polygonize(_02)` | Profiled as more expensive than the union |
+| `is_extension` flag on Voronoi cells | All Voronoi cells straddle the interior/extension boundary — seed points are on exterior polygon edges, so cells spread both inward and outward. No cell is purely interior or purely exterior |
+| Endpoint test (`ST_StartPoint` / `ST_EndPoint`) | Fails for the narrow-notch edge case described above |
+
+---
+
 ## DuckDB 1.5.2 `SPATIAL_JOIN` Memory Reservation Bug
 
 DuckDB 1.5.2's `SPATIAL_JOIN` operator pre-allocates approximately **1× physical RAM** as a virtual memory spill reservation before executing, regardless of actual data size. The default `memory_limit` of 80% RAM falls below this threshold on most machines, causing an immediate OOM error even when the join touches only ~100 MB of real data.

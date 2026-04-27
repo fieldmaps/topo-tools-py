@@ -4,6 +4,8 @@ from decimal import Decimal
 
 from duckdb import DuckDBPyConnection
 
+from app.config import SNAP_TOLERANCE
+
 
 def main(conn: DuckDBPyConnection, name: str, distance: Decimal) -> None:
     """Create points along boundary lines."""
@@ -12,7 +14,7 @@ def main(conn: DuckDBPyConnection, name: str, distance: Decimal) -> None:
     # Small buffer around all line endpoints to mark the shared-boundary zone
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_03_tmp1" AS
-        SELECT ST_Union_Agg(ST_Buffer(ST_Boundary(geom), 0.00000001))
+        SELECT ST_Union_Agg(ST_Buffer(ST_Boundary(geom), {SNAP_TOLERANCE}))
             AS geom
         FROM "{name}_02"
     """)

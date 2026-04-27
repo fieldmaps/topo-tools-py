@@ -34,3 +34,16 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     """)
 
     conn.execute(f'DROP TABLE IF EXISTS "{name}_02_tmp1"')
+
+    # Unique line endpoints per fid (start + end of each exterior edge).
+    # fid is kept so merge.py can restrict snap-point matching to the same fid,
+    # preventing adjacent polygons' corners from false-splitting a ring.
+    conn.execute(f"""--sql
+        CREATE OR REPLACE TABLE "{name}_02a" AS
+        SELECT DISTINCT fid, geom FROM (
+            SELECT fid, ST_StartPoint(geom) AS geom FROM "{name}_02"
+            UNION ALL
+            SELECT fid, ST_EndPoint(geom) AS geom FROM "{name}_02"
+        )
+        WHERE geom IS NOT NULL
+    """)
