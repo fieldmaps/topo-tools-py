@@ -13,14 +13,7 @@ def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
         else f"SELECT * FROM ST_Read('{path}')"
     )
 
-    # Load once with stable fid; re-reading twice risks non-deterministic row ordering
-    conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_raw" AS
-        SELECT *, row_number() OVER () AS fid
-        FROM ({read_expr})
-    """)
-
-    schema = conn.execute(f'DESCRIBE "{name}_raw"').fetchall()
+    schema = conn.execute(f"DESCRIBE {read_expr}").fetchall()
     geom_col, geom_type = next(
         (col[0], col[1]) for col in schema if col[1].startswith("GEOMETRY")
     )
@@ -31,12 +24,6 @@ def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
         or (col[0].endswith("_bbox") and col[1].startswith("STRUCT"))
     ]
     exclude_sql = ", ".join(f'"{c}"' for c in exclude_cols)
-
-    conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_attr" AS
-        SELECT * EXCLUDE ({exclude_sql})
-        FROM "{name}_raw"
-    """)
 
     # ST_Read tags geometry with source CRS; single-arg ST_Transform infers it.
     # Parquet geometries are untagged (assumed EPSG:4326), so skip transform.
@@ -49,8 +36,7 @@ def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_01" AS
         SELECT * EXCLUDE ({exclude_sql}),
+               row_number() OVER () AS fid,
                {geom_expr} AS geom
-        FROM "{name}_raw"
+        FROM ({read_expr})
     """)
-
-    conn.execute(f'DROP TABLE "{name}_raw"')

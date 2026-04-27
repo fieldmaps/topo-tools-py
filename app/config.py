@@ -27,6 +27,7 @@ parser.add_argument("--tmp-dir", default=getenv("TMP_DIR", str(cwd / "../tmp")))
 parser.add_argument("--distance", default=getenv("DISTANCE", "0.0002"))
 parser.add_argument("--threads", default=getenv("THREADS", "4"))
 parser.add_argument("--overwrite", default=getenv("OVERWRITE", "NO"))
+parser.add_argument("--debug", default=getenv("DEBUG", "NO"))
 
 args = parser.parse_args()
 
@@ -43,6 +44,7 @@ output_dir = Path(args.output_dir)
 output_file = Path(args.output_file) if args.output_file else None
 tmp_dir = Path(args.tmp_dir)
 overwrite = _is_bool(args.overwrite)
+debug = _is_bool(args.debug)
 
 FORMATS = [".shp", ".geojson", ".parquet", ".gpkg"]
 

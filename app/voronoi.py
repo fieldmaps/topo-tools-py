@@ -2,7 +2,7 @@
 
 from duckdb import DuckDBPyConnection
 
-from .topology import check_gaps, check_missing_rows, check_overlaps
+from .config import debug
 
 
 def main(conn: DuckDBPyConnection, name: str) -> None:
@@ -28,7 +28,6 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         JOIN "{name}_04_tmp1" AS b
         ON ST_Intersects(a.geom, b.geom)
     """)
-    check_missing_rows(conn, f"{name}_03", f"{name}_04_tmp2")
 
     # Union Voronoi cells by fid
     conn.execute(f"""--sql
@@ -37,15 +36,13 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         FROM "{name}_04_tmp2"
         GROUP BY fid
     """)
-    check_overlaps(conn, f"{name}_04_tmp3")
 
-    check_gaps(conn, f"{name}_04_tmp3")
-
+    conn.execute(f'DROP TABLE IF EXISTS "{name}_04"')
     conn.execute(f'ALTER TABLE "{name}_04_tmp3" RENAME TO "{name}_04"')
 
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp1"')
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp2"')
-
-    # _03 has no readers past this stage; release it before merge starts.
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_03"')
+    if not debug:
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp1"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp2"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_02"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_03"')
     conn.execute("CHECKPOINT")

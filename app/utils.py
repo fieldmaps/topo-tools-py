@@ -2,11 +2,19 @@
 
 from collections.abc import Generator
 from contextlib import contextmanager
+from logging import getLogger
 
 from duckdb import DuckDBPyConnection
 from duckdb import connect as duckdb_connect
 
 from .config import num_threads, tmp_dir
+
+logger = getLogger(__name__)
+
+_GEO_PARQUET = (
+    "(FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 15, GEOPARQUET_VERSION 'V2')"
+)
+_PARQUET = "(FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 15)"
 
 
 def get_connection(name: str) -> DuckDBPyConnection:
@@ -36,7 +44,27 @@ def spatial_join_memory(conn: DuckDBPyConnection) -> Generator[None, None, None]
         conn.execute(f"SET memory_limit = '{orig}'")
 
 
-def cleanup_tmp(name: str) -> None:
-    """Remove the DuckDB file for a pipeline run."""
+def cleanup_tmp(name: str, *, parquet: bool = False) -> None:
+    """Remove tmp files for a named pipeline run."""
     for p in tmp_dir.glob(f"{name}.duckdb*"):
         p.unlink(missing_ok=True)
+    if parquet:
+        for p in tmp_dir.glob(f"{name}*.parquet"):
+            p.unlink(missing_ok=True)
+
+
+def export_debug_tables(conn: DuckDBPyConnection) -> None:
+    """Export all pipeline tables to Parquet files for inspection."""
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tables = conn.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema = 'main' ORDER BY table_name"
+    ).fetchall()
+    for (table,) in tables:
+        out = str(tmp_dir / f"{table}.parquet")
+        has_geom = conn.execute(
+            "SELECT COUNT(*) > 0 FROM information_schema.columns "
+            f"WHERE table_name = '{table}' AND data_type = 'GEOMETRY'"
+        ).fetchall()[0][0]
+        opts = _GEO_PARQUET if has_geom else _PARQUET
+        conn.execute(f"COPY \"{table}\" TO '{out}' {opts}")

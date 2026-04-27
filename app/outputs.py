@@ -1,4 +1,4 @@
-"""Joins geometry with original attributes and exports output files."""
+"""Exports output files from the final merged geometry table."""
 
 from logging import getLogger
 from pathlib import Path
@@ -16,7 +16,7 @@ def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
     for check in (
         lambda: check_overlaps(conn, f"{name}_05"),
         lambda: check_gaps(conn, f"{name}_05"),
-        lambda: check_missing_rows(conn, f"{name}_05", f"{name}_attr"),
+        lambda: check_missing_rows(conn, f"{name}_05", f"{name}_01"),
     ):
         try:
             check()
@@ -28,9 +28,7 @@ def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
 
     conn.execute(f"""--sql
         COPY (
-            SELECT a.geom AS geometry, b.* EXCLUDE (fid)
-            FROM "{name}_05" AS a
-            LEFT JOIN "{name}_attr" AS b
-            ON a.fid = b.fid
+            SELECT * EXCLUDE (fid) RENAME (geom AS geometry)
+            FROM "{name}_05"
         ) TO '{dest}' {COPY_OPTS[path.suffix]}
     """)

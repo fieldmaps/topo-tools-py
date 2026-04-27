@@ -2,25 +2,21 @@
 
 from duckdb import DuckDBPyConnection
 
+from .config import debug
 from .utils import spatial_join_memory
 
 
 def main(conn: DuckDBPyConnection, name: str) -> None:
     """Merge original geom with extended Voronoi polygons."""
-    # Interior shared edges between adjacent original polygons. Materialized
-    # here (not in lines.py) so it does not sit on disk during points + voronoi.
-    # a.fid < b.fid avoids duplicate pairs; ST_Intersects pre-filters before
-    # the more expensive ST_Intersection.
+    # Interior shared edges between adjacent original polygons. a.fid < b.fid avoids
+    # duplicate pairs; DISTINCT drops any duplicate segments before noding;
+    # ST_Intersects pre-filters before the more expensive ST_Intersection.
     conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_05a_inner" AS
-        SELECT
-            fid_a,
-            fid_b,
+        CREATE OR REPLACE TABLE "{name}_05_tmp1" AS
+        SELECT DISTINCT
             UNNEST(ST_Dump(ST_LineMerge(line_geom))).geom AS geom
         FROM (
             SELECT
-                a.fid AS fid_a,
-                b.fid AS fid_b,
                 ST_CollectionExtract(
                     ST_Intersection(ST_Boundary(a.geom), ST_Boundary(b.geom)), 2
                 ) AS line_geom
@@ -34,112 +30,103 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     # Clip Voronoi boundaries to the extension zone only. ST_Difference removes
     # every Voronoi edge inside the original coverage, leaving only the lines
     # that delineate the extension area. ST_CollectionExtract strips stray points
-    # from tangent contacts before noding.
+    # from tangent contacts before noding. Done per-row to avoid materializing
+    # one large collected geometry for the entire Voronoi boundary set.
     conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_05b_ext" AS
+        CREATE OR REPLACE TABLE "{name}_05_tmp2" AS
         WITH orig_union AS (
             SELECT ST_Union_Agg(geom) AS geom FROM "{name}_01"
-        ),
-        voro_bd AS (
-            SELECT ST_Collect(list(ST_Boundary(geom))) AS geom FROM "{name}_04"
         )
-        SELECT ST_CollectionExtract(ST_Difference(v.geom, o.geom), 2) AS geom
-        FROM voro_bd AS v, orig_union AS o
+        SELECT ST_CollectionExtract(ST_Difference(ST_Boundary(v.geom), o.geom), 2)
+            AS geom
+        FROM "{name}_04" AS v
+        CROSS JOIN orig_union AS o
     """)
 
-    # Node all three line sources together then polygonize into pieces.
-    # _02 + _05a_inner exactly reconstruct every original polygon boundary, so
-    # polygonize produces exactly one piece per original polygon — enabling the
-    # one-to-one _05d_pip assignment below. ST_Node ensures every crossing is a
-    # shared vertex, eliminating topology seams.
+    # Node _05_tmp1 + _05_tmp2 and polygonize into final pieces. ST_Node
+    # ensures every crossing is a shared vertex, eliminating topology seams.
+    # ST_Difference in _05_tmp2 computes clip-point coordinates via GEOS
+    # intersection arithmetic, which can drift from the exact vertex in _05_tmp1
+    # by up to ~1e-7 degrees, preventing ST_Node from creating the required
+    # junction node. Fix: decompose _05_tmp2 into 2-point segments and replace
+    # any endpoint within 1e-7 of a _05_tmp1 vertex with the exact vertex
+    # coordinate via ST_ClosestPoint. _05_tmp1 coordinates are never modified.
     conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_05c_pieces" AS
-        WITH lines AS (
-            SELECT geom FROM "{name}_05b_ext"
+        CREATE OR REPLACE TABLE "{name}_05_tmp3" AS
+        WITH int_pts AS (
+            SELECT ST_Collect(list(pt)) AS mpt
+            FROM (
+                SELECT UNNEST(ST_Dump(ST_Points(geom))).geom AS pt
+                FROM "{name}_05_tmp1"
+            )
+        ),
+        ext_lines AS (
+            SELECT UNNEST(ST_Dump(geom)).geom AS geom
+            FROM "{name}_05_tmp2"
+            WHERE NOT ST_IsEmpty(geom)
+        ),
+        segments AS (
+            SELECT
+                ST_PointN(l.geom, t.i::INTEGER) AS p1,
+                ST_PointN(l.geom, t.i::INTEGER + 1) AS p2
+            FROM ext_lines l,
+            UNNEST(generate_series(1, ST_NumPoints(l.geom) - 1)) AS t(i)
+        ),
+        snapped AS (
+            SELECT
+                CASE WHEN ST_Distance(s.p1, i.mpt) < 1e-7
+                     THEN ST_ClosestPoint(i.mpt, s.p1)
+                     ELSE s.p1
+                END AS p1,
+                CASE WHEN ST_Distance(s.p2, i.mpt) < 1e-7
+                     THEN ST_ClosestPoint(i.mpt, s.p2)
+                     ELSE s.p2
+                END AS p2
+            FROM segments s
+            CROSS JOIN int_pts i
+        ),
+        lines AS (
+            SELECT ST_MakeLine(p1, p2) AS geom
+            FROM snapped
+            WHERE NOT ST_Equals(p1, p2)
             UNION ALL
-            SELECT geom FROM "{name}_02"
-            UNION ALL
-            SELECT geom FROM "{name}_05a_inner"
+            SELECT geom FROM "{name}_05_tmp1"
         ),
         noded AS (
             SELECT ST_Node(ST_Collect(list(geom))) AS geom FROM lines
         )
-        SELECT row_number() OVER () AS pid, geom
+        SELECT geom
         FROM (
             SELECT UNNEST(ST_Dump(ST_Polygonize(list(geom)))).geom AS geom
             FROM noded
         )
     """)
 
-    # Line sources have no further readers; release before the spatial joins.
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_02"')
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_05a_inner"')
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_05b_ext"')
+    if not debug:
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp1"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp2"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_04"')
 
-    # One guaranteed-interior point per original polygon. Materialized here
-    # (not in points.py) so it only exists during merge.
-    conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_05d_pip" AS
-        SELECT fid, ST_PointOnSurface(geom) AS geom
-        FROM "{name}_01"
-    """)
-
+    # Each _05_tmp3 polygon is a full Voronoi cell (land + extension combined),
+    # so each _01 centroid falls inside exactly one _05_tmp3 cell. All original
+    # attributes are carried through so outputs.py requires no re-join.
     with spatial_join_memory(conn):
-        # Polygonize reconstructs each original polygon as exactly one piece,
-        # so this is a one-to-one join. MIN(fid) is defensive for the
-        # degenerate case of a pip landing exactly on a shared boundary.
         conn.execute(
-            f'CREATE INDEX "{name}_05c_ridx" ON "{name}_05c_pieces" USING RTREE (geom)'
+            f'CREATE INDEX "{name}_05_tmp3_ridx" ON "{name}_05_tmp3" USING RTREE (geom)'
         )
         conn.execute(f"""--sql
-            CREATE OR REPLACE TABLE "{name}_05e_orig" AS
-            SELECT p.pid, MIN(pip.fid) AS fid
-            FROM "{name}_05d_pip" AS pip
-            JOIN "{name}_05c_pieces" AS p ON ST_Within(pip.geom, p.geom)
-            GROUP BY p.pid
+            CREATE OR REPLACE TABLE "{name}_05" AS
+            WITH pts AS (
+                SELECT * EXCLUDE (geom), ST_PointOnSurface(geom) AS pt
+                FROM "{name}_01"
+            )
+            SELECT p.* EXCLUDE (pt), ST_Multi(ST_Union_Agg(v.geom)) AS geom
+            FROM "{name}_05_tmp3" AS v
+            JOIN pts AS p ON ST_Within(p.pt, v.geom)
+            GROUP BY ALL
         """)
-        conn.execute(f'DROP INDEX "{name}_05c_ridx"')
+        conn.execute(f'DROP INDEX "{name}_05_tmp3_ridx"')
 
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_05d_pip"')
-
-    # Materialize interior points for extension pieces only — much smaller than
-    # computing PointOnSurface for every piece in the dataset.
-    conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_05f_pts" AS
-        SELECT p.pid, ST_PointOnSurface(p.geom) AS pt
-        FROM "{name}_05c_pieces" AS p
-        WHERE p.pid NOT IN (SELECT pid FROM "{name}_05e_orig")
-    """)
-
-    with spatial_join_memory(conn):
-        conn.execute(f'CREATE INDEX "{name}_04_ridx" ON "{name}_04" USING RTREE (geom)')
-        conn.execute(f"""--sql
-            CREATE OR REPLACE TABLE "{name}_05g_voro" AS
-            SELECT ep.pid, MIN(v.fid) AS fid
-            FROM "{name}_05f_pts" AS ep
-            JOIN "{name}_04" AS v ON ST_Within(ep.pt, v.geom)
-            GROUP BY ep.pid
-        """)
-        conn.execute(f'DROP INDEX "{name}_04_ridx"')
-
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_05f_pts"')
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_04"')
-
-    # Fused assignment + final union: pieces JOIN orig/voro, group by fid in
-    # one shot. Skips the _05_assigned materialization (same row count as
-    # _05c_pieces, the largest table at this stage).
-    conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_05" AS
-        SELECT COALESCE(orig.fid, voro.fid) AS fid,
-               ST_Multi(ST_Union_Agg(p.geom)) AS geom
-        FROM "{name}_05c_pieces" AS p
-        LEFT JOIN "{name}_05e_orig" AS orig ON p.pid = orig.pid
-        LEFT JOIN "{name}_05g_voro" AS voro ON p.pid = voro.pid
-        WHERE COALESCE(orig.fid, voro.fid) IS NOT NULL
-        GROUP BY 1
-    """)
-
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_05e_orig"')
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_05g_voro"')
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_05c_pieces"')
+    if not debug:
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp3"')
     conn.execute("CHECKPOINT")
