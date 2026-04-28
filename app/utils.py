@@ -1,15 +1,18 @@
 """Shared utilities: DuckDB connection and pipeline helpers."""
 
+import contextlib
 import re
 import threading
 import time
 from logging import getLogger
 
+import psutil
 from duckdb import DuckDBPyConnection
 from duckdb import connect as duckdb_connect
 
 from .config import in_memory, num_threads, profile, tmp_dir
 
+_PROCESS = psutil.Process()
 logger = getLogger(__name__)
 
 _GEO_PARQUET = (
@@ -55,17 +58,18 @@ class _EagerResult:
 
 
 class ProfiledConnection:
-    """Proxy around DuckDBPyConnection; logs timing and memory delta per execute()."""
+    """Proxy around DuckDBPyConnection; logs RSS peak and duckdb delta per execute().
 
-    def __init__(self, conn: DuckDBPyConnection, db_path: str | None = None) -> None:  # noqa: D107
+    RSS peak is the primary metric for Docker/WASM sizing — it captures GEOS working
+    memory (ST_VoronoiDiagram, ST_Node, ST_Polygonize) that duckdb_memory() misses.
+    duckdb delta/total are shown as secondary context for table accumulation.
+    """
+
+    def __init__(self, conn: DuckDBPyConnection) -> None:  # noqa: D107
         self._conn = conn
-        # Second connection to the same file shares the buffer manager, allowing
-        # peak memory to be sampled from a background thread during query execution.
-        # Not available for in-memory databases (no file to connect to).
-        self._monitor = duckdb_connect(db_path) if db_path and profile else None
 
     def execute(self, query: str, parameters: list | None = None):  # noqa: ANN201
-        """Log wall-clock time and duckdb_memory() delta, then forward."""
+        """Log wall-clock time, RSS peak, and duckdb delta/total, then forward."""
         if not profile:
             return (
                 self._conn.execute(query, parameters)
@@ -73,60 +77,47 @@ class ProfiledConnection:
                 else self._conn.execute(query)
             )
         t0 = time.perf_counter()
-        before = self._conn.execute(_MEM_Q).fetchall()[0][0]
+        before_rss = _PROCESS.memory_info().rss
+        before_ddb = self._conn.execute(_MEM_Q).fetchall()[0][0]
 
-        peak = [before]
+        peak_rss = [before_rss]
         stop = threading.Event()
 
         def _poll() -> None:
             while not stop.is_set():
-                try:
-                    val = self._monitor.execute(_MEM_Q).fetchall()[0][0]
-                    peak[0] = max(peak[0], val)
-                except Exception:  # noqa: BLE001, S110
-                    pass
+                with contextlib.suppress(Exception):
+                    peak_rss[0] = max(peak_rss[0], _PROCESS.memory_info().rss)
                 stop.wait(0.05)
 
-        if self._monitor:
-            threading.Thread(target=_poll, daemon=True).start()
+        threading.Thread(target=_poll, daemon=True).start()
 
         result = (
             self._conn.execute(query, parameters)
             if parameters is not None
             else self._conn.execute(query)
         )
-        # Materialize before the after-memory query, which would otherwise
+        # Materialize before the after-memory queries, which would otherwise
         # invalidate the result cursor on the same connection.
         rows = result.fetchall()
 
         stop.set()
-        after = self._conn.execute(_MEM_Q).fetchall()[0][0]
-        peak[0] = max(peak[0], after)
+        after_rss = _PROCESS.memory_info().rss
+        peak_rss[0] = max(peak_rss[0], after_rss)
+        after_ddb = self._conn.execute(_MEM_Q).fetchall()[0][0]
 
         elapsed = time.perf_counter() - t0
-        if self._monitor:
-            logger.info(
-                "query %.3fs | %+.1f MB | %.1f MB total | %.1f MB peak | %s",
-                elapsed,
-                (after - before) / 1e6,
-                after / 1e6,
-                peak[0] / 1e6,
-                _query_label(query),
-            )
-        else:
-            logger.info(
-                "query %.3fs | %+.1f MB | %.1f MB total | %s",
-                elapsed,
-                (after - before) / 1e6,
-                after / 1e6,
-                _query_label(query),
-            )
+        logger.info(
+            "query %.3fs | rss peak %.0f MB | duckdb %+.0f MB | %.0f MB total | %s",
+            elapsed,
+            peak_rss[0] / 1e6,
+            (after_ddb - before_ddb) / 1e6,
+            after_ddb / 1e6,
+            _query_label(query),
+        )
         return _EagerResult(rows)
 
     def close(self) -> None:
         """Close the underlying connection."""
-        if self._monitor:
-            self._monitor.close()
         self._conn.close()
 
     def __getattr__(self, name: str) -> object:  # noqa: D105
@@ -142,7 +133,7 @@ def get_connection(name: str) -> ProfiledConnection:
     conn.execute("SET geometry_always_xy = true")
     conn.execute("SET preserve_insertion_order = false")
     conn.execute(f"SET threads = {num_threads}")
-    return ProfiledConnection(conn, db_path=db_path)
+    return ProfiledConnection(conn)
 
 
 def cleanup_tmp(name: str, *, parquet: bool = False) -> None:
