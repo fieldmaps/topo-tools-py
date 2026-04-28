@@ -37,7 +37,6 @@ parser.add_argument("--overwrite", **_bool_flag("OVERWRITE"))
 parser.add_argument("--debug", **_bool_flag("DEBUG"))
 parser.add_argument("--profile", **_bool_flag("PROFILE"))
 parser.add_argument("--in-memory", **_bool_flag("IN_MEMORY"))
-parser.add_argument("--check", **_bool_flag("CHECK"))
 parser.add_argument(
     "--stage",
     default=getenv("STAGE"),
@@ -61,7 +60,6 @@ overwrite = args.overwrite
 debug = args.debug or bool(args.stage)
 profile = args.profile
 in_memory = args.in_memory
-check = args.check
 stage = args.stage
 
 FORMATS = [".shp", ".geojson", ".parquet", ".gpkg"]

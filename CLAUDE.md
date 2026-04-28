@@ -67,7 +67,6 @@ The pipeline has 5 sequential stages, each a standalone module in `app/`. All st
 | `DEBUG`                    | `False`                    | Keep intermediate tables; export all to Parquet               |
 | `PROFILE`                  | `False`                    | Log timing + memory delta per query                           |
 | `IN_MEMORY`                | `False`                    | Use in-memory DuckDB instead of file-backed                   |
-| `CHECK`                    | `False`                    | Run overlap/gap checks in outputs (can be slow on large data) |
 | `STAGE`                    | (none)                     | Run only one named stage (inputs/lines/attempt/merge/outputs) |
 
 ### Table Naming Convention
@@ -84,7 +83,7 @@ The current sequence: `_01` → `_02a/_02b` → `_03a/_03b` → `_04` → `_05`
 
 - **DuckDB spatial extension** handles all geometry operations (`ST_*` functions). One connection (file-backed by default, or in-memory with `--in-memory`) is created per input file in `utils.py` and returned as a `ProfiledConnection` proxy that logs timing and memory per query when `--profile` is set.
 - **DuckDB tables as IPC** — stages read and write named tables on the shared connection; no Parquet between stages.
-- **Topology validation** in `topology.py`: `check_missing_rows` always runs in outputs; `check_overlaps` and `check_gaps` only run when `--check` is set (both use expensive aggregates that can hang on large datasets).
+- **Topology validation** in `checks.py`: `check_overlaps`, `check_gaps`, and `check_missing_rows` always run in outputs. All three unnest MultiPolygon geometries before checking to ensure correct coverage validation across individual polygon pieces.
 - **Geometry column names**: `geom` in DuckDB tables, `geometry` in final output.
 - **Avoid `ST_ClosestPoint(ST_Collect(list(geom)), point)` on large tables.** Collecting thousands of lines into one geometry before calling `ST_ClosestPoint` causes GEOS to allocate large internal acceleration structures — ~6.8 GB for Chile's 700K-point `_02b`. Instead, use a per-segment bbox pre-filter: CROSS JOIN with the source table and filter by `ST_XMin/XMax/YMin/YMax` before calling `ST_ClosestPoint` on only the matching segments. See `_05_tmp2` in `merge.py`.
 - **`duckdb_memory()` measurements in isolation underestimate pipeline peaks.** A fresh connection with few tables in the DuckDB file can show 4 GB for a query that peaks at 8 GB in a full pipeline run, because the buffer pool from other large tables (`_01`, `_04`, `_02b`, etc.) adds several GB of additional pressure. Profile with `--stage=X --profile` on a database file that already has all prior-stage tables present.

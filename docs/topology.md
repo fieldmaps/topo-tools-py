@@ -36,7 +36,7 @@ Applying `ST_ReducePrecision` to only the extension pieces (not originals) makes
 
 This produces **0 gaps, 0 overlaps, 0 `ST_CoverageInvalidEdges`** on all tested datasets. Original polygon vertex coordinates are never modified — the noding only adds collinear intermediate vertices where Voronoi edges cross original polygon edges, which is geometrically identical.
 
-### Topology checks (`topology.py`)
+### Topology checks (`checks.py`)
 
 Both a **strict** and an **area-based** check are run and compared:
 

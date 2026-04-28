@@ -146,10 +146,14 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_05" AS
         WITH
+        cells AS (
+            SELECT ROW_NUMBER() OVER () AS cid, geom AS vgeom FROM "{name}_05_tmp3"
+        ),
         all_joined AS (
-            SELECT c.geom AS vgeom, p.* EXCLUDE (pt)
-            FROM "{name}_05_tmp3" AS c
-            LEFT JOIN "{name}_05_tmp4" AS p ON ST_Within(p.pt, c.geom)
+            SELECT c.vgeom, p.* EXCLUDE (pt)
+            FROM cells c
+            LEFT JOIN "{name}_05_tmp4" AS p ON ST_Within(p.pt, c.vgeom)
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY c.cid ORDER BY p.fid NULLS LAST) = 1
         ),
         unmatched AS (
             SELECT ROW_NUMBER() OVER () AS uid, vgeom
@@ -175,4 +179,4 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
 
     if not debug:
         conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp3"')
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp4"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp4"')

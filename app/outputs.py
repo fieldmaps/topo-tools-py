@@ -1,29 +1,60 @@
-"""Exports output files from the final merged geometry table."""
+"""Validates topology and exports output files from the final merged geometry table."""
 
 from logging import getLogger
 from pathlib import Path
 
 from duckdb import DuckDBPyConnection
 
-from .config import COPY_OPTS, check, debug, output_dir, output_file
-from .topology import check_gaps, check_missing_rows, check_overlaps
+from .config import COPY_OPTS, debug, output_dir, output_file
 
 logger = getLogger(__name__)
 
 
+def _check_overlaps(conn: DuckDBPyConnection, table: str) -> None:
+    has_overlaps = conn.execute(f"""--sql
+        SELECT ST_CoverageInvalidEdges_Agg(geom) IS NOT NULL
+        FROM (SELECT UNNEST(ST_Dump(geom)).geom AS geom FROM "{table}")
+    """).fetchall()[0][0]
+    if has_overlaps:
+        error = f"OVERLAPS: {table}"
+        logger.error(error)
+        raise RuntimeError(error)
+
+
+def _check_gaps(conn: DuckDBPyConnection, table: str) -> None:
+    interior_rings = conn.execute(f"""--sql
+        WITH u AS (
+            SELECT ST_Union_Agg(geom) AS g
+            FROM (SELECT UNNEST(ST_Dump(geom)).geom AS geom FROM "{table}")
+        )
+        SELECT ST_NumInteriorRings(g)
+        FROM u
+    """).fetchall()[0][0]
+    if (interior_rings or 0) > 0:
+        error = f"GAPS: {table}"
+        logger.error(error)
+        raise RuntimeError(error)
+
+
+def _check_missing_rows(conn: DuckDBPyConnection, table_1: str, table_2: str) -> None:
+    rows_1 = conn.execute(f'SELECT count(*) FROM "{table_1}"').fetchall()[0][0] or 0
+    rows_2 = conn.execute(f'SELECT count(*) FROM "{table_2}"').fetchall()[0][0] or 0
+    if rows_1 != rows_2:
+        error = (
+            f"MISSING ROWS: {table_1} has {rows_1} rows, "
+            f"but {table_2} has {rows_2} rows"
+        )
+        logger.error(error)
+        raise RuntimeError(error)
+
+
 def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
     """Output results to path."""
-    checks = [
-        lambda: check_missing_rows(conn, f"{name}_05", f"{name}_01"),
-    ]
-    if check:
-        checks = [
-            lambda: check_overlaps(conn, f"{name}_05"),
-            lambda: check_gaps(conn, f"{name}_05"),
-            *checks,
-        ]
-
-    for run_check in checks:
+    for run_check in [
+        lambda: _check_overlaps(conn, f"{name}_05"),
+        lambda: _check_gaps(conn, f"{name}_05"),
+        lambda: _check_missing_rows(conn, f"{name}_05", f"{name}_01"),
+    ]:
         try:
             run_check()
         except RuntimeError as e:
@@ -32,8 +63,6 @@ def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
     dest = output_file or output_dir / path.name
     dest.parent.mkdir(exist_ok=True, parents=True)
 
-    # Export final merged geometry. fid is internal; geometry column renamed
-    # to match the GeoParquet/OGC convention expected by downstream tools.
     conn.execute(f"""--sql
         COPY (
             SELECT * EXCLUDE (fid) RENAME (geom AS geometry)
