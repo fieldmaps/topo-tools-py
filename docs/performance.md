@@ -30,23 +30,24 @@ RSS peak per phase for Chile admin3 at 1 thread:
 
 | Phase       | Module       | RSS Peak     | Wall time | Main bottleneck                                           |
 | ----------- | ------------ | ------------ | --------- | --------------------------------------------------------- |
-| Input       | `inputs.py`  | 696 MB       | ~1s       | I/O                                                       |
-| Lines       | `lines.py`   | 6,081 MB     | ~53s      | LATERAL join O(n × neighbors); GEOS line extraction       |
-| Points      | `points.py`  | 1,775 MB     | ~17s      | Interpolation + endpoint union                            |
-| **Voronoi** | `voronoi.py` | **7,748 MB** | ~326s     | `ST_VoronoiDiagram` + fid join + `ST_Union_Agg`           |
-| **Merge**   | `merge.py`   | 5,252 MB     | ~8s       | `ST_Node` + `ST_Polygonize` + `ST_Within` join            |
-| Outputs     | `outputs.py` | 5,282 MB     | ~10s      | `check_gaps` `ST_Union_Agg` + COPY                        |
+| Input       | `inputs.py`  | 680 MB       | ~1s       | I/O                                                       |
+| Lines       | `lines.py`   | 2,708 MB     | ~28s      | Self-join bbox neighbor union + GEOS line extraction      |
+| Points      | `points.py`  | 2,282 MB     | ~7s       | Interpolation + endpoint union                            |
+| **Voronoi** | `voronoi.py` | **6,901 MB** | ~278s     | `ST_VoronoiDiagram` + fid join + `ST_Union_Agg`           |
+| **Merge**   | `merge.py`   | 6,455 MB     | ~4s       | `ST_Node` + `ST_Polygonize` + `_05` `ST_Within` join      |
+| Outputs     | `outputs.py` | 6,490 MB     | ~3s       | `check_gaps` `ST_Union_Agg` + COPY                        |
 
-**Voronoi** (`_04_tmp1`) is the pipeline peak at ~7.7 GB. The stage has three steps:
+**Voronoi** (`_04_tmp1`) is the pipeline peak at ~6.9 GB. The stage has three steps:
 `_04_tmp1` collects all points and calls `ST_VoronoiDiagram` (GEOS heap, invisible to
-`duckdb_memory()`; ~6.9 GB hidden at 1 thread); `_04_tmp2` assigns a source `fid` to each
-cell via `ST_Intersects` (thread-sensitive: 118s at 1t); `_04` unions
-cells by `fid` via `ST_Union_Agg` (single-threaded GEOS, ~166s flat across all thread
+`duckdb_memory()`; most of the peak is hidden at 1 thread); `_04_tmp2` assigns a source
+`fid` to each cell via `ST_Intersects` (thread-sensitive: 100s at 1t); `_04` unions
+cells by `fid` via `ST_Union_Agg` (single-threaded GEOS, ~141s flat across all thread
 counts). The retry/doubling-distance mechanism in `attempt.py` is the safety valve: it
 backs off from 10M points until the operation fits in available memory.
 
-**Lines** (`_02b`) is the first ~6 GB breach in the pipeline. Line extraction involves
-complex GEOS operations across all polygon boundaries simultaneously.
+**Lines** (`_02b`) used to be the first ~6 GB breach in the pipeline. After the
+bbox-self-join rewrite (see below), the stage peaks at ~2.7 GB at 1 thread —
+Voronoi is now the only stage that crosses 6 GB.
 
 **Outputs topology checks**: `check_overlaps` is a self-join that could degrade to O(n²)
 pairs without a spatial index, but DuckDB's `SPATIAL_JOIN` rewrite handles non-overlapping
@@ -59,22 +60,20 @@ final polygons — the most expensive single query in the outputs phase.
 
 | threads    | pipeline peak RSS | `_04_tmp2` time | `_04` time | `_02b` time | `_05` time | total time |
 | ---------- | ----------------- | --------------- | ---------- | ----------- | ---------- | ---------- |
-| 1          | **7,748 MB**      | 118.2s          | 166.4s     | 27.9s       | 2.5s       | ~414s      |
-| unset (10) | 8,290 MB          | 47.8s           | 137.7s     | 16.8s       | 1.9s       | ~265s      |
+| 1          | **6,901 MB**      | 100.2s          | 141.3s     | 7.4s        | 1.8s       | ~320s      |
+| unset (10) | 6,776 MB          | 56.3s           | 140.3s     | 7.5s        | 1.9s       | ~271s      |
 
 Pipeline peak is `_04_tmp1` (Voronoi point collection + diagram) at all thread counts.
 
 Key thread-sensitivity breakdown:
-- `_04_tmp2` (fid assignment via `ST_Intersects`): 118s → 48s, 2.5× faster with more threads
-- `_04` (`ST_Union_Agg` by fid, single-threaded GEOS): ~166s → ~138s, mostly flat — the hard ceiling
-- `_02b` (line extraction): 27.9s → 16.8s, modest gain
-- `_05` (SPATIAL_JOIN): 2.5s → 1.9s, negligible
+- `_04_tmp2` (fid assignment via `ST_Intersects`): 100s → 56s, 1.8× faster with more threads
+- `_04` (`ST_Union_Agg` by fid, single-threaded GEOS): ~141s → ~140s, flat — the hard ceiling
+- `_02b` (line extraction, bbox-self-join): 7.4s → 7.5s, no gain — `PIECEWISE_MERGE_JOIN` is single-threaded internally
+- `_05` (`SPATIAL_JOIN` on `_05_tmp4` ST_Within): 1.8s → 1.9s, negligible
 
-Note: 1-thread row re-benchmarked with `ST_MemUnion_Agg` in `lines.py`/`points.py`/`outputs.py`; 10-thread row is from an earlier measurement with `ST_Union_Agg` everywhere.
-
-For memory-constrained deployments: `--threads=1` gives the lowest peak at ~7.8 GB. Still
-well above a 4 GB WASM/Docker target — reducing below that requires pipeline changes
-(chunking or reduced point density via `--distance`).
+For memory-constrained deployments: `--threads=1` gives a similar peak (~6.9 GB) to
+default threads. Both are above a 4 GB WASM/Docker target — reducing below that requires
+pipeline changes (chunking or reduced point density via `--distance`).
 
 ---
 
@@ -95,6 +94,48 @@ a 2 GB container) so DuckDB can spill to disk rather than crash.
 
 ---
 
+## Lines stage bbox-self-join
+
+The lines stage previously expressed the per-polygon "neighbor boundary union" as a
+`LATERAL` subquery containing `ST_Intersects(a.geom, b.geom)`, which DuckDB rewrites to
+the `SPATIAL_JOIN` operator. `SPATIAL_JOIN` pre-allocates ~1× RAM as a virtual spill
+reservation — the same reservation behavior documented in `topology.md` — so even on
+small data the lines stage held a multi-GB working set.
+
+The current form materializes neighbor unions via a self-join with **scalar bbox
+predicates only**, then keys `_02a`/`_02b` off the resulting `_02_tmp2` table:
+
+```sql
+CREATE TABLE _02_tmp2 AS
+SELECT a.fid AS afid, ST_Union_Agg(b.geom) AS neighbor_union
+FROM _02_tmp1 AS a
+JOIN _02_tmp1 AS b
+  ON a.fid != b.fid
+ AND ST_XMax(b.geom) >= ST_XMin(a.geom)
+ AND ST_XMin(b.geom) <= ST_XMax(a.geom)
+ AND ST_YMax(b.geom) >= ST_YMin(a.geom)
+ AND ST_YMin(b.geom) <= ST_YMax(a.geom)
+GROUP BY a.fid
+```
+
+DuckDB plans this as `PIECEWISE_MERGE_JOIN` + `HASH_GROUP_BY` — no `SPATIAL_JOIN`.
+Bbox-only is correct because a non-touching neighbor adds nothing to subsequent
+`ST_Difference` / `ST_Intersection` against `a`'s boundary, so the loose prefilter is
+conservative-but-equivalent. Empirically the bbox prefilter is as selective as
+`ST_Intersects` on tessellated admin layers (avg 6.4 neighbors/poly on both Burundi and
+Chile, max 17).
+
+Result on Chile at 1 thread: lines stage peak drops from 6,081 MB → 2,708 MB (−55%) and
+wall time drops from ~53s → ~28s (−47%). End-to-end `_05` outputs are byte-equivalent
+(`ST_Equals` per fid, 0% sym-diff).
+
+The same pattern applies in `merge.py` `_05_tmp1`: an explicit bbox prefilter
+(`ST_X(pt)` vs `ST_XMin/XMax(p.geom)` etc.) on the `NOT EXISTS` subquery removes
+`SPATIAL_JOIN` from that plan too. The remaining `SPATIAL_JOIN` site is `_05`'s
+`LEFT JOIN ST_Within` against `_05_tmp4`.
+
+---
+
 ## Merge stage memory profile (Chile)
 
 Full-pipeline RSS peaks for the merge stage queries at 1 thread. Note: these include the
@@ -103,11 +144,11 @@ memory, so they are higher than isolated `--stage=merge` measurements.
 
 | Query      | RSS peak | Notes                                                              |
 | ---------- | -------- | ------------------------------------------------------------------ |
-| `_05_tmp1` | 6,050 MB | Extension line extraction (ST_Difference + NOT EXISTS vs `_01`)    |
-| `_05_tmp2` | 6,088 MB | Endpoint snapping to `_02b`; see below                             |
-| `_05_tmp3` | 6,255 MB | `ST_Node` + `ST_Polygonize`; `_02b` dropped immediately after      |
-| `_05_tmp4` | 6,181 MB | One interior point per polygon part (from `ST_Dump` on `_01`)      |
-| `_05`      | 6,700 MB | `LEFT JOIN ST_Within` + nearest-neighbor fallback for orphan cells  |
+| `_05_tmp1` | 3,711 MB | Extension line extraction (`ST_Difference` + bbox-prefiltered `NOT EXISTS` vs `_01`) |
+| `_05_tmp2` | 3,727 MB | Endpoint snapping to `_02b`; see below                             |
+| `_05_tmp3` | 4,250 MB | `ST_Node` + `ST_Polygonize`; `_02b` dropped immediately after      |
+| `_05_tmp4` | 4,247 MB | One interior point per polygon part (from `ST_Dump` on `_01`)      |
+| `_05`      | 6,455 MB | `LEFT JOIN ST_Within` (`SPATIAL_JOIN`) + nearest-neighbor fallback for orphan cells |
 
 ### `_05_tmp2`: `ST_ClosestPoint` against collected geometry
 
@@ -160,8 +201,10 @@ pipeline (Chile admin3, default threads). Three configurations:
   because DuckDB already rewrites `JOIN … ON ST_Intersects(…)` to its internal
   `SPATIAL_JOIN` operator with its own temporary spatial index. An explicit RTREE creates
   a second index the planner must consider.
-- `_02a`/`_02b`: LATERAL subqueries evaluate as correlated loops; DuckDB cannot use a
-  table-level RTREE inside them. The index is built and never probed.
+- `_02a`/`_02b`: at the time of this experiment, lines used LATERAL subqueries that
+  evaluate as correlated loops; DuckDB cannot use a table-level RTREE inside them. The
+  index is built and never probed. The current bbox-self-join form (see above) plans as
+  `PIECEWISE_MERGE_JOIN` with explicit scalar predicates, also bypassing any RTREE.
 - `_05`: times of 6.1s / 6.8s / 6.0s across none/merge/all are noise. The RTREE on
   `_05_tmp3` provided no measurable benefit.
 - `_05_tmp1` NOT EXISTS filter against `_01`: indistinguishable across configs.
@@ -186,7 +229,7 @@ The index itself was always noise.
 
 **Result: `ST_MemUnion_Agg` is only viable where the union set per invocation is small.**
 
-- **`_02a`/`_02b` (lines)**: each LATERAL neighbor union covers 3–10 geometries. Memory drops 3.7% (6,311 → 6,081 MB); time rises ~47% (36s → 53s). Marginal tradeoff — kept because lines is not the pipeline bottleneck and the memory direction is correct.
+- **`_02a`/`_02b` (lines)**: each LATERAL neighbor union covered 3–10 geometries. Memory dropped 3.7% (6,311 → 6,081 MB); time rose ~47% (36s → 53s). Marginal tradeoff — kept at the time because lines was not the pipeline bottleneck and the memory direction was correct. (Superseded by the bbox-self-join rewrite, which removes LATERAL entirely; `ST_Union_Agg` is retained inside the new self-join's GROUP BY.)
 - **`_03a` (points)**: global union of all exterior line segments' buffered endpoints. With `ST_MemUnion_Agg`, each segment is merged into a growing geometry one at a time — O(n²) as the accumulated shape grows. Time ~2.5× slower (3.5s → 8.7s) with no significant memory benefit.
 - **`_04` (voronoi)**: each `fid` group contains hundreds to thousands of Voronoi cells. Each incremental merge grows the accumulated geometry, making later merges progressively more expensive. The query ran far beyond 135s and was killed. **`ST_Union_Agg` restored.**
 - **`check_gaps` (outputs)**: union of all final polygons (~355 for Chile). Time rises from ~1s to 8.9s with no memory benefit.

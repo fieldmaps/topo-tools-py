@@ -12,6 +12,12 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     # (buffered original endpoints), leaving only lines that delineate the area
     # beyond the original polygons. The NOT EXISTS filter drops any remaining
     # segments whose interior falls inside an original polygon (_01).
+    #
+    # The bbox prefilter on the NOT EXISTS subquery is required: without it,
+    # DuckDB rewrites the correlated ST_Within into a SPATIAL_JOIN, which
+    # pre-allocates ~1x RAM as a virtual spill reservation and triggers OOMs on
+    # constrained memory budgets. With explicit ST_X/ST_Y vs ST_XMin/XMax/
+    # YMin/YMax comparisons, the planner uses HASH_JOIN + FILTER instead.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_05_tmp1" AS
         WITH
@@ -26,14 +32,19 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
                 FROM voronoi_lines v CROSS JOIN "{name}_03a" c
             ) WHERE NOT ST_IsEmpty(geom)
         ),
-        sections AS (
-            SELECT UNNEST(ST_Dump(geom)).geom AS geom FROM cut_lines
+        sections_pt AS (
+            SELECT geom, ST_PointOnSurface(geom) AS pt
+            FROM (SELECT UNNEST(ST_Dump(geom)).geom AS geom FROM cut_lines)
         )
         SELECT s.geom
-        FROM sections s
+        FROM sections_pt s
         WHERE NOT EXISTS (
             SELECT 1 FROM "{name}_01" p
-            WHERE ST_Within(ST_PointOnSurface(s.geom), p.geom)
+            WHERE ST_X(s.pt) >= ST_XMin(p.geom)
+              AND ST_X(s.pt) <= ST_XMax(p.geom)
+              AND ST_Y(s.pt) >= ST_YMin(p.geom)
+              AND ST_Y(s.pt) <= ST_YMax(p.geom)
+              AND ST_Within(s.pt, p.geom)
         )
     """)
 
