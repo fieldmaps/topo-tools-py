@@ -157,6 +157,13 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
 
     # LEFT JOIN so orphan extension cells are caught by the fallback rather than
     # silently dropped as gaps.
+    #
+    # The bbox prefilter on the LEFT JOIN ON clause is required: ST_Within alone
+    # plans as SPATIAL_JOIN (~1x RAM virtual reservation). With explicit
+    # ST_X/ST_Y(p.pt) vs ST_XMin/XMax/YMin/YMax(c.vgeom) comparisons, the
+    # planner uses PIECEWISE_MERGE_JOIN with ST_Within applied as a residual
+    # FILTER. The bbox predicates are necessary conditions for ST_Within so
+    # adding them does not change semantics.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_05" AS
         WITH
@@ -166,7 +173,12 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         all_joined AS (
             SELECT c.vgeom, p.* EXCLUDE (pt)
             FROM cells c
-            LEFT JOIN "{name}_05_tmp4" AS p ON ST_Within(p.pt, c.vgeom)
+            LEFT JOIN "{name}_05_tmp4" AS p
+              ON ST_X(p.pt) >= ST_XMin(c.vgeom)
+             AND ST_X(p.pt) <= ST_XMax(c.vgeom)
+             AND ST_Y(p.pt) >= ST_YMin(c.vgeom)
+             AND ST_Y(p.pt) <= ST_YMax(c.vgeom)
+             AND ST_Within(p.pt, c.vgeom)
             QUALIFY ROW_NUMBER() OVER (PARTITION BY c.cid ORDER BY p.fid NULLS LAST) = 1
         ),
         unmatched AS (
