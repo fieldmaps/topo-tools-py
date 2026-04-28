@@ -28,7 +28,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     for d in [distance * 2**i for i in range(10)]:
         try:
             points.main(conn, name, d)
-            count = conn.execute(f'SELECT count(*) FROM "{name}_03"').fetchall()[0][0]
+            count = conn.execute(f'SELECT count(*) FROM "{name}_03b"').fetchall()[0][0]
             _check_point_count(count)
             voronoi.main(conn, name)
         except (RuntimeError, DuckDBError) as e:

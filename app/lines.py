@@ -16,7 +16,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     # neighbours' boundaries. The lateral join finds neighbours locally so
     # there is no global ST_Union_Agg over all polygons in the dataset.
     conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_02" AS
+        CREATE OR REPLACE TABLE "{name}_02a" AS
         SELECT
             a.fid,
             UNNEST(ST_Dump(ST_LineMerge(ST_CollectionExtract(
@@ -33,17 +33,25 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         ) AS sub ON true
     """)
 
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_02_tmp1"')
-
-    # Unique line endpoints per fid (start + end of each exterior edge).
-    # fid is kept so merge.py can restrict snap-point matching to the same fid,
-    # preventing adjacent polygons' corners from false-splitting a ring.
+    # Interior edges = each polygon's boundary intersected with its neighbours'
+    # boundaries. Each shared edge appears once per adjacent polygon (double-
+    # counted), which is fine for ST_Node in merge.
     conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_02a" AS
-        SELECT DISTINCT fid, geom FROM (
-            SELECT fid, ST_StartPoint(geom) AS geom FROM "{name}_02"
-            UNION ALL
-            SELECT fid, ST_EndPoint(geom) AS geom FROM "{name}_02"
+        CREATE OR REPLACE TABLE "{name}_02b" AS
+        SELECT UNNEST(ST_Dump(ST_LineMerge(geom))).geom AS geom
+        FROM (
+            SELECT ST_CollectionExtract(
+                ST_Intersection(a.geom, sub.neighbor_union), 2
+            ) AS geom
+            FROM "{name}_02_tmp1" AS a
+            LEFT JOIN LATERAL (
+                SELECT ST_Union_Agg(b.geom) AS neighbor_union
+                FROM "{name}_02_tmp1" AS b
+                WHERE b.fid != a.fid AND ST_Intersects(a.geom, b.geom)
+            ) AS sub ON true
+            WHERE sub.neighbor_union IS NOT NULL
         )
-        WHERE geom IS NOT NULL
+        WHERE NOT ST_IsEmpty(geom)
     """)
+
+    conn.execute(f'DROP TABLE IF EXISTS "{name}_02_tmp1"')

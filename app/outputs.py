@@ -5,7 +5,7 @@ from pathlib import Path
 
 from duckdb import DuckDBPyConnection
 
-from .config import COPY_OPTS, debug, output_dir, output_file
+from .config import COPY_OPTS, check, debug, output_dir, output_file
 from .topology import check_gaps, check_missing_rows, check_overlaps
 
 logger = getLogger(__name__)
@@ -16,16 +16,16 @@ def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
     checks = [
         lambda: check_missing_rows(conn, f"{name}_05", f"{name}_01"),
     ]
-    if debug:
+    if check:
         checks = [
             lambda: check_overlaps(conn, f"{name}_05"),
             lambda: check_gaps(conn, f"{name}_05"),
             *checks,
         ]
 
-    for check in checks:
+    for run_check in checks:
         try:
-            check()
+            run_check()
         except RuntimeError as e:
             logger.warning(e)
 

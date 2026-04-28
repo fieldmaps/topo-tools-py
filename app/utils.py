@@ -3,8 +3,6 @@
 import re
 import threading
 import time
-from collections.abc import Generator
-from contextlib import contextmanager
 from logging import getLogger
 
 from duckdb import DuckDBPyConnection
@@ -75,7 +73,7 @@ class ProfiledConnection:
                 else self._conn.execute(query)
             )
         t0 = time.perf_counter()
-        before = self._conn.execute(_MEM_Q).fetchone()[0]
+        before = self._conn.execute(_MEM_Q).fetchall()[0][0]
 
         peak = [before]
         stop = threading.Event()
@@ -83,7 +81,7 @@ class ProfiledConnection:
         def _poll() -> None:
             while not stop.is_set():
                 try:
-                    val = self._monitor.execute(_MEM_Q).fetchone()[0]
+                    val = self._monitor.execute(_MEM_Q).fetchall()[0][0]
                     peak[0] = max(peak[0], val)
                 except Exception:  # noqa: BLE001, S110
                     pass
@@ -102,7 +100,7 @@ class ProfiledConnection:
         rows = result.fetchall()
 
         stop.set()
-        after = self._conn.execute(_MEM_Q).fetchone()[0]
+        after = self._conn.execute(_MEM_Q).fetchall()[0][0]
         peak[0] = max(peak[0], after)
 
         elapsed = time.perf_counter() - t0
@@ -147,22 +145,6 @@ def get_connection(name: str) -> ProfiledConnection:
     return ProfiledConnection(conn, db_path=db_path)
 
 
-@contextmanager
-def spatial_join_memory(conn: DuckDBPyConnection) -> Generator[None, None, None]:
-    """Temporarily bypass DuckDB 1.5.2 SPATIAL_JOIN virtual-memory reservation.
-
-    The SPATIAL_JOIN operator pre-allocates ~1x physical RAM as a virtual spill
-    reservation. Raising memory_limit above that threshold lets it proceed;
-    actual peak usage stays under 100 MB. See CLAUDE.md for full details.
-    """
-    orig = conn.execute("SELECT current_setting('memory_limit')").fetchall()[0][0]
-    conn.execute("SET memory_limit = '999GB'")
-    try:
-        yield
-    finally:
-        conn.execute(f"SET memory_limit = '{orig}'")
-
-
 def cleanup_tmp(name: str, *, parquet: bool = False) -> None:
     """Remove tmp files for a named pipeline run."""
     if not in_memory:
@@ -173,14 +155,16 @@ def cleanup_tmp(name: str, *, parquet: bool = False) -> None:
             p.unlink(missing_ok=True)
 
 
-def export_debug_tables(conn: DuckDBPyConnection) -> None:
-    """Export all pipeline tables to Parquet files for inspection."""
+def export_debug_tables(conn: DuckDBPyConnection, only: set[str] | None = None) -> None:
+    """Export pipeline tables to Parquet files for inspection."""
     tmp_dir.mkdir(parents=True, exist_ok=True)
     tables = conn.execute(
         "SELECT table_name FROM information_schema.tables "
         "WHERE table_schema = 'main' ORDER BY table_name"
     ).fetchall()
     for (table,) in tables:
+        if only is not None and table not in only:
+            continue
         out = str(tmp_dir / f"{table}.parquet")
         has_geom = conn.execute(
             "SELECT COUNT(*) > 0 FROM information_schema.columns "

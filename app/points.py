@@ -11,18 +11,18 @@ def main(conn: DuckDBPyConnection, name: str, distance: Decimal) -> None:
     """Create points along boundary lines."""
     d = float(distance)
 
-    # Small buffer around all line endpoints to mark the shared-boundary zone
+    # Buffered union of all line endpoints — marks the shared-boundary zone
     conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_03_tmp1" AS
+        CREATE OR REPLACE TABLE "{name}_03a" AS
         SELECT ST_Union_Agg(ST_Buffer(ST_Boundary(geom), {SNAP_TOLERANCE}))
             AS geom
-        FROM "{name}_02"
+        FROM "{name}_02a"
     """)
 
     # Interpolated points along each line minus the shared-boundary zone,
     # union'd with the line endpoints also minus the shared-boundary zone
     conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_03" AS
+        CREATE OR REPLACE TABLE "{name}_03b" AS
         SELECT fid, geom FROM (
             SELECT
                 a.fid,
@@ -34,18 +34,16 @@ def main(conn: DuckDBPyConnection, name: str, distance: Decimal) -> None:
                     ),
                     b.geom
                 ))).geom AS geom
-            FROM "{name}_02" AS a
-            CROSS JOIN "{name}_03_tmp1" AS b
+            FROM "{name}_02a" AS a
+            CROSS JOIN "{name}_03a" AS b
             UNION ALL
             SELECT
                 a.fid,
                 UNNEST(ST_Dump(ST_Boundary(
                     ST_Difference(a.geom, b.geom)
                 ))).geom AS geom
-            FROM "{name}_02" AS a
-            CROSS JOIN "{name}_03_tmp1" AS b
+            FROM "{name}_02a" AS a
+            CROSS JOIN "{name}_03a" AS b
         )
         WHERE geom IS NOT NULL AND NOT ST_IsEmpty(geom)
     """)
-
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_03_tmp1"')

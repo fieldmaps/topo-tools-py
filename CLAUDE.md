@@ -47,9 +47,9 @@ The pipeline has 5 sequential stages, each a standalone module in `app/`. All st
 
 ### Pipeline Stages
 
-1. **`inputs.main`** — Reads geodata via DuckDB `ST_Read`, reprojects to EPSG:4326, stores as `*_attr` (attributes) and `*_01` (geometry)
-2. **`lines.main`** — Extracts exterior boundary lines per polygon via lateral-join neighbour union (`*_02`); also produces `*_02a` (unique line endpoints per fid)
-3. **`attempt.main`** — Wrapper around `points.main` + `voronoi.main` that retries with doubling distance on failure (0.0002 → 0.1024, up to 10 attempts); `points.main` creates interpolated points (`*_03`), `voronoi.main` generates Voronoi polygons (`*_04`)
+1. **`inputs.main`** — Reads geodata via DuckDB `ST_Read`, reprojects to EPSG:4326, stores as `*_01` (geometry)
+2. **`lines.main`** — Extracts boundary lines per polygon; produces `*_02a` (exterior edges) and `*_02b` (interior/shared edges)
+3. **`attempt.main`** — Wrapper around `points.main` + `voronoi.main` that retries with doubling distance on failure (0.0002 → 0.1024, up to 10 attempts); `points.main` creates `*_03a` (buffered endpoint union) and `*_03b` (interpolated points), `voronoi.main` generates Voronoi polygons (`*_04`)
 4. **`merge.main`** — Merges Voronoi extension with original polygons via `ST_Node` + `ST_Polygonize` (`*_05`)
 5. **`outputs.main`** — Validates topology, joins geometry with original attributes, exports via DuckDB COPY
 
@@ -67,18 +67,54 @@ The pipeline has 5 sequential stages, each a standalone module in `app/`. All st
 | `DEBUG`                    | `False`                    | Keep intermediate tables; export all to Parquet               |
 | `PROFILE`                  | `False`                    | Log timing + memory delta per query                           |
 | `IN_MEMORY`                | `False`                    | Use in-memory DuckDB instead of file-backed                   |
+| `CHECK`                    | `False`                    | Run overlap/gap checks in outputs (can be slow on large data) |
 | `STAGE`                    | (none)                     | Run only one named stage (inputs/lines/attempt/merge/outputs) |
+
+### Table Naming Convention
+
+Tables are named `{name}_{stage}[suffix]` where stage is a two-digit number and suffix is either empty, a letter, or `_tmp{n}`:
+
+- **No suffix** — stage produces exactly one persistent table (e.g. `_01`, `_04`, `_05`)
+- **Letter suffix (`_02a`, `_02b`)** — stage produces multiple persistent tables; **all** of them get a letter, including the first. Never leave one bare while siblings have letters.
+- **`_tmp{n}` suffix** — table is dropped within the same file before the function returns; not visible to downstream stages unless `--debug` is set
+
+The current sequence: `_01` → `_02a/_02b` → `_03a/_03b` → `_04` → `_05`
 
 ### Key Patterns
 
 - **DuckDB spatial extension** handles all geometry operations (`ST_*` functions). One connection (file-backed by default, or in-memory with `--in-memory`) is created per input file in `utils.py` and returned as a `ProfiledConnection` proxy that logs timing and memory per query when `--profile` is set.
 - **DuckDB tables as IPC** — stages read and write named tables on the shared connection; no Parquet between stages.
-- **Topology validation** in `topology.py` (`check_overlaps`, `check_gaps`, `check_missing_rows`) runs after Voronoi generation and again before final output.
+- **Topology validation** in `topology.py`: `check_missing_rows` always runs in outputs; `check_overlaps` and `check_gaps` only run when `--check` is set (both use expensive aggregates that can hang on large datasets).
 - **Geometry column names**: `geom` in DuckDB tables, `geometry` in final output.
 
 ### Supported Formats
 
 Input/output: GeoParquet (`.parquet`), GeoPackage (`.gpkg`), Shapefile (`.shp`), GeoJSON (`.geojson`). Output format matches input format.
+
+## DuckDB Function Verification
+
+Do not rely on recalled knowledge about DuckDB or spatial extension functions — verify against the installed version before making claims or writing code.
+
+**CLI — best for specific function lookups** (includes full description, parameter docs, return type):
+
+```bash
+# Check a specific function — signature + full description
+duckdb -c "LOAD spatial; SELECT function_name, parameters, parameter_types, return_type, description FROM duckdb_functions() WHERE function_name ILIKE 'ST_Buffer'"
+
+# List all spatial functions
+duckdb -c "LOAD spatial; SELECT function_name, parameters, return_type FROM duckdb_functions() WHERE function_name ILIKE 'ST_%' ORDER BY function_name"
+
+# Search by keyword in description
+duckdb -c "LOAD spatial; SELECT function_name, description FROM duckdb_functions() WHERE description ILIKE '%voronoi%'"
+```
+
+**gh api — best for browsing the full spatial function reference** (always matched to the installed version):
+
+```bash
+# Fetch the full spatial functions reference — branch derived from installed DuckDB version
+DUCKDB_REF=$(duckdb --version | sed 's/v\([0-9]*\.[0-9]*\)\.[0-9]* (\([^)]*\)).*/v\1-\2/' | tr '[:upper:]' '[:lower:]') && \
+gh api "repos/duckdb/duckdb-spatial/contents/docs/functions.md?ref=${DUCKDB_REF}" --jq '.content' | base64 -d
+```
 
 ## Reference Docs
 

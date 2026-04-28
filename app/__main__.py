@@ -32,6 +32,14 @@ _STAGES = {
     "outputs": outputs.main,
 }
 
+_STAGE_TABLES = {
+    "inputs": ["{n}_01"],
+    "lines": ["{n}_02a", "{n}_02b"],
+    "attempt": ["{n}_03a", "{n}_03b", "{n}_04", "{n}_04_tmp1", "{n}_04_tmp2"],
+    "merge": ["{n}_05", "{n}_05_tmp1", "{n}_05_tmp2"],
+    "outputs": [],
+}
+
 
 def _run_file(path: Path) -> None:
     name = path.name.replace(".", "_")
@@ -52,7 +60,10 @@ def _run_file(path: Path) -> None:
                     logger.info("=== %s ===", s)
                 fn(conn, name, path)
         if debug:
-            export_debug_tables(conn)
+            only = None
+            if stage and stage in _STAGE_TABLES:
+                only = {t.format(n=name) for t in _STAGE_TABLES[stage]}
+            export_debug_tables(conn, only=only)
         logger.info("done: %s", name)
     finally:
         signal.signal(signal.SIGINT, old_handler)

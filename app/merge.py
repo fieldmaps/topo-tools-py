@@ -7,41 +7,18 @@ from .config import SNAP_TOLERANCE, debug
 
 def main(conn: DuckDBPyConnection, name: str) -> None:
     """Merge original geom with extended Voronoi polygons."""
-    # Interior shared edges between adjacent original polygons. a.fid < b.fid avoids
-    # duplicate pairs; ST_Intersects pre-filters before the more expensive
-    # ST_Intersection.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_05_tmp1" AS
-        SELECT
-            UNNEST(ST_Dump(ST_LineMerge(line_geom))).geom AS geom
-        FROM (
-            SELECT
-                ST_CollectionExtract(
-                    ST_Intersection(ST_Boundary(a.geom), ST_Boundary(b.geom)), 2
-                ) AS line_geom
-            FROM "{name}_01" AS a
-            JOIN "{name}_01" AS b
-                ON a.fid < b.fid AND ST_Intersects(a.geom, b.geom)
-        )
-        WHERE NOT ST_IsEmpty(line_geom)
-    """)
-
-    conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_05_tmp2" AS
         WITH
         voronoi_lines AS (
             SELECT ST_Boundary(geom) AS geom FROM "{name}_04"
-        ),
-        cut_geom AS (
-            SELECT ST_Buffer(ST_Collect(list(geom)), {SNAP_TOLERANCE}) AS geom
-            FROM "{name}_02a"
         ),
         cut_lines AS (
             SELECT geom FROM (
                 SELECT ST_CollectionExtract(
                     ST_Difference(v.geom, c.geom), 2
                 ) AS geom
-                FROM voronoi_lines v CROSS JOIN cut_geom c
+                FROM voronoi_lines v CROSS JOIN "{name}_03a" c
             ) WHERE NOT ST_IsEmpty(geom)
         ),
         sections AS (
@@ -57,10 +34,10 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
 
     snap_dist = SNAP_TOLERANCE * 2
     conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_05_tmp3" AS
+        CREATE OR REPLACE TABLE "{name}_05_tmp2" AS
         WITH
         tmp1_collected AS MATERIALIZED (
-            SELECT ST_Collect(list(geom)) AS geom FROM "{name}_05_tmp1"
+            SELECT ST_Collect(list(geom)) AS geom FROM "{name}_02b"
         ),
         endpoints AS (
             SELECT
@@ -69,7 +46,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
                 ST_NPoints(t.geom) AS npts,
                 ST_ClosestPoint(c.geom, ST_StartPoint(t.geom)) AS close_s,
                 ST_ClosestPoint(c.geom, ST_EndPoint(t.geom)) AS close_e
-            FROM "{name}_05_tmp2" t CROSS JOIN tmp1_collected c
+            FROM "{name}_05_tmp1" t CROSS JOIN tmp1_collected c
         ),
         pts AS (
             SELECT id, npts, close_s, close_e, geom,
@@ -96,12 +73,11 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     """)
 
     if not debug:
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_02"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_02a"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_03a"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_04"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp2"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp1"')
 
-    # Inline the former _05_tmp3 polygonization and spatial assignment together.
     # LEFT JOIN instead of inner JOIN so that orphan cells (slivers produced by
     # noding that contain no original polygon centroid) are caught by the fallback
     # rather than silently dropped as gaps.
@@ -109,9 +85,9 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         CREATE OR REPLACE TABLE "{name}_05" AS
         WITH
         lines AS (
-            SELECT geom FROM "{name}_05_tmp1"
+            SELECT geom FROM "{name}_02b"
             UNION ALL
-            SELECT geom FROM "{name}_05_tmp3"
+            SELECT geom FROM "{name}_05_tmp2"
         ),
         noded AS (
             SELECT ST_Node(ST_Collect(list(geom))) AS geom FROM lines
@@ -156,6 +132,6 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     """)
 
     if not debug:
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp1"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp3"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_02b"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp2"')
     conn.execute("CHECKPOINT")

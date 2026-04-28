@@ -15,7 +15,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
                 ST_VoronoiDiagram(ST_Collect(list(geom))), 3
             )
         )).geom AS geom
-        FROM "{name}_03"
+        FROM "{name}_03b"
     """)
 
     # Assign source fid to each Voronoi cell via point-in-polygon.
@@ -24,7 +24,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_04_tmp2" AS
         SELECT a.fid, b.geom
-        FROM "{name}_03" AS a
+        FROM "{name}_03b" AS a
         JOIN "{name}_04_tmp1" AS b
         ON ST_Intersects(a.geom, b.geom)
     """)
@@ -41,7 +41,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     conn.execute(f'ALTER TABLE "{name}_04_tmp3" RENAME TO "{name}_04"')
 
     if not debug:
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_03"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_03b"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp1"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp2"')
     conn.execute("CHECKPOINT")
