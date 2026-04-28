@@ -33,6 +33,10 @@ def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
         else f'ST_Force2D(ST_MakeValid("{geom_col}"))'
     )
 
+    # Reproject to EPSG:4326 and store as the canonical input table. ST_MakeValid
+    # repairs broken ring orientations or self-intersections before transform.
+    # ST_Force2D drops any Z/M coordinates that downstream GEOS operations
+    # don't handle correctly. Parquet inputs skip ST_Transform (already WGS84).
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_01" AS
         SELECT * EXCLUDE ({exclude_sql}),

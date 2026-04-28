@@ -108,11 +108,11 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         conn.execute(f'DROP TABLE IF EXISTS "{name}_04"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp1"')
 
-    # LEFT JOIN instead of inner JOIN so that orphan cells (slivers produced by
-    # noding that contain no original polygon centroid) are caught by the fallback
-    # rather than silently dropped as gaps.
+    # Split noding+polygonizing from the spatial join so DuckDB can release the
+    # noding working memory before SPATIAL_JOIN begins. An RTREE index is added
+    # after materialization since CTEs cannot be indexed.
     conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_05" AS
+        CREATE OR REPLACE TABLE "{name}_05_tmp3" AS
         WITH
         lines AS (
             SELECT geom FROM "{name}_02b"
@@ -121,23 +121,36 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         ),
         noded AS (
             SELECT ST_Node(ST_Collect(list(geom))) AS geom FROM lines
-        ),
-        cells AS (
-            SELECT UNNEST(ST_Dump(ST_Polygonize(list(geom)))).geom AS geom
-            FROM noded
-        ),
-        parts AS (
+        )
+        SELECT UNNEST(ST_Dump(ST_Polygonize(list(geom)))).geom AS geom
+        FROM noded
+    """)
+    conn.execute(
+        f'CREATE INDEX "{name}_05_tmp3_rtree" ON "{name}_05_tmp3" USING RTREE (geom)'
+    )
+
+    # One representative interior point per polygon part (ST_Dump handles
+    # multipolygons). Used by the SPATIAL_JOIN in _05 to assign each Voronoi cell
+    # to the original polygon whose interior point falls inside it.
+    conn.execute(f"""--sql
+        CREATE OR REPLACE TABLE "{name}_05_tmp4" AS
+        WITH parts AS (
             SELECT * EXCLUDE (geom), UNNEST(ST_Dump(geom)).geom AS part_geom
             FROM "{name}_01"
-        ),
-        pts AS (
-            SELECT * EXCLUDE (part_geom), ST_PointOnSurface(part_geom) AS pt
-            FROM parts
-        ),
+        )
+        SELECT * EXCLUDE (part_geom), ST_PointOnSurface(part_geom) AS pt
+        FROM parts
+    """)
+
+    # LEFT JOIN so orphan extension cells are caught by the fallback rather than
+    # silently dropped as gaps.
+    conn.execute(f"""--sql
+        CREATE OR REPLACE TABLE "{name}_05" AS
+        WITH
         all_joined AS (
             SELECT c.geom AS vgeom, p.* EXCLUDE (pt)
-            FROM cells AS c
-            LEFT JOIN pts AS p ON ST_Within(p.pt, c.geom)
+            FROM "{name}_05_tmp3" AS c
+            LEFT JOIN "{name}_05_tmp4" AS p ON ST_Within(p.pt, c.geom)
         ),
         unmatched AS (
             SELECT ROW_NUMBER() OVER () AS uid, vgeom
@@ -146,7 +159,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         fallback AS (
             SELECT u.vgeom, p.* EXCLUDE (pt)
             FROM unmatched u
-            CROSS JOIN pts p
+            CROSS JOIN "{name}_05_tmp4" p
             QUALIFY ROW_NUMBER() OVER (
                 PARTITION BY u.uid
                 ORDER BY ST_Distance(ST_Centroid(u.vgeom), p.pt)
@@ -164,4 +177,6 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     if not debug:
         conn.execute(f'DROP TABLE IF EXISTS "{name}_02b"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp2"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp3"')
+    conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp4"')
     conn.execute("CHECKPOINT")

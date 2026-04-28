@@ -36,7 +36,7 @@ _STAGE_TABLES = {
     "inputs": ["{n}_01"],
     "lines": ["{n}_02a", "{n}_02b"],
     "attempt": ["{n}_03a", "{n}_03b", "{n}_04", "{n}_04_tmp1", "{n}_04_tmp2"],
-    "merge": ["{n}_05", "{n}_05_tmp1", "{n}_05_tmp2"],
+    "merge": ["{n}_05", "{n}_05_tmp1", "{n}_05_tmp2", "{n}_05_tmp3"],
     "outputs": [],
 }
 

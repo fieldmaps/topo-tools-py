@@ -32,6 +32,8 @@ def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
     dest = output_file or output_dir / path.name
     dest.parent.mkdir(exist_ok=True, parents=True)
 
+    # Export final merged geometry. fid is internal; geometry column renamed
+    # to match the GeoParquet/OGC convention expected by downstream tools.
     conn.execute(f"""--sql
         COPY (
             SELECT * EXCLUDE (fid) RENAME (geom AS geometry)
