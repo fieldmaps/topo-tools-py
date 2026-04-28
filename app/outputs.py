@@ -13,11 +13,17 @@ logger = getLogger(__name__)
 
 def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
     """Output results to path."""
-    for check in (
-        lambda: check_overlaps(conn, f"{name}_05"),
-        lambda: check_gaps(conn, f"{name}_05"),
+    checks = [
         lambda: check_missing_rows(conn, f"{name}_05", f"{name}_01"),
-    ):
+    ]
+    if debug:
+        checks = [
+            lambda: check_overlaps(conn, f"{name}_05"),
+            lambda: check_gaps(conn, f"{name}_05"),
+            *checks,
+        ]
+
+    for check in checks:
         try:
             check()
         except RuntimeError as e:

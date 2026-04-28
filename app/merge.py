@@ -8,11 +8,11 @@ from .config import SNAP_TOLERANCE, debug
 def main(conn: DuckDBPyConnection, name: str) -> None:
     """Merge original geom with extended Voronoi polygons."""
     # Interior shared edges between adjacent original polygons. a.fid < b.fid avoids
-    # duplicate pairs; DISTINCT drops any duplicate segments before noding;
-    # ST_Intersects pre-filters before the more expensive ST_Intersection.
+    # duplicate pairs; ST_Intersects pre-filters before the more expensive
+    # ST_Intersection.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_05_tmp1" AS
-        SELECT DISTINCT
+        SELECT
             UNNEST(ST_Dump(ST_LineMerge(line_geom))).geom AS geom
         FROM (
             SELECT
@@ -44,11 +44,8 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
                 FROM voronoi_lines v CROSS JOIN cut_geom c
             ) WHERE NOT ST_IsEmpty(geom)
         ),
-        unioned AS (
-            SELECT ST_LineMerge(ST_Union_Agg(geom)) AS geom FROM cut_lines
-        ),
         sections AS (
-            SELECT UNNEST(ST_Dump(geom)).geom AS geom FROM unioned
+            SELECT UNNEST(ST_Dump(geom)).geom AS geom FROM cut_lines
         )
         SELECT s.geom
         FROM sections s

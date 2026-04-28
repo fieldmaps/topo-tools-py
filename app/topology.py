@@ -4,15 +4,18 @@ from logging import getLogger
 
 from duckdb import DuckDBPyConnection
 
+from app.utils import spatial_join_memory
+
 logger = getLogger(__name__)
 
 
 def check_overlaps(conn: DuckDBPyConnection, table: str) -> None:
     """Check for overlapping polygons using ST_CoverageInvalidEdges_Agg."""
-    has_overlaps = conn.execute(f"""--sql
-        SELECT ST_CoverageInvalidEdges_Agg(geom) IS NOT NULL
-        FROM "{table}"
-    """).fetchall()[0][0]
+    with spatial_join_memory(conn):
+        has_overlaps = conn.execute(f"""--sql
+            SELECT ST_CoverageInvalidEdges_Agg(geom) IS NOT NULL
+            FROM "{table}"
+        """).fetchall()[0][0]
 
     if has_overlaps:
         error = f"OVERLAPS: {table}"
