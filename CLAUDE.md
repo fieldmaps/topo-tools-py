@@ -43,33 +43,35 @@ Pre-commit hooks run `uv-sync`, `ruff-format`, and `ruff-check` automatically.
 
 ## Architecture
 
-The pipeline has 6 sequential stages, each a standalone module in `app/`. All stages share a single file-backed DuckDB connection; tables are the IPC mechanism between stages. `__main__.py` chains all stages together in a sequential for-loop over input files.
+The pipeline has 5 sequential stages, each a standalone module in `app/`. All stages share a single DuckDB connection (file-backed or in-memory); tables are the IPC mechanism between stages. `__main__.py` chains all stages together in a sequential for-loop over input files.
 
 ### Pipeline Stages
 
 1. **`inputs.main`** — Reads geodata via DuckDB `ST_Read`, reprojects to EPSG:4326, stores as `*_attr` (attributes) and `*_01` (geometry)
-2. **`lines.main`** — Extracts exterior boundary lines per polygon via lateral-join neighbour union (`*_02`)
-3. **`attempt.main`** — Wrapper around `points.main` + `voronoi.main` that retries with doubling distance on failure (0.0002 → 0.1024, up to 10 attempts)
-4. **`points.main`** — Creates interpolated points along exterior boundary lines at configurable intervals (`*_03`)
-5. **`voronoi.main`** — Generates Voronoi polygons from points (`ST_VoronoiDiagram`), assigns fid, validates topology (`*_04`)
-6. **`merge.main`** — Merges Voronoi extension with original polygons via `ST_Node` + `ST_Polygonize` (`*_05`)
-7. **`outputs.main`** — Validates topology, joins geometry with original attributes, exports via DuckDB COPY
+2. **`lines.main`** — Extracts exterior boundary lines per polygon via lateral-join neighbour union (`*_02`); also produces `*_02a` (unique line endpoints per fid)
+3. **`attempt.main`** — Wrapper around `points.main` + `voronoi.main` that retries with doubling distance on failure (0.0002 → 0.1024, up to 10 attempts); `points.main` creates interpolated points (`*_03`), `voronoi.main` generates Voronoi polygons (`*_04`)
+4. **`merge.main`** — Merges Voronoi extension with original polygons via `ST_Node` + `ST_Polygonize` (`*_05`)
+5. **`outputs.main`** — Validates topology, joins geometry with original attributes, exports via DuckDB COPY
 
 ### Configuration
 
 `app/config.py` parses CLI arguments and environment variables at **module level**. All other modules import from config directly. Key settings:
 
-| Setting                    | Default        | Description                            |
-| -------------------------- | -------------- | -------------------------------------- |
-| `DISTANCE`                 | `0.0002`       | Point spacing in decimal degrees       |
-| `INPUT_DIR` / `OUTPUT_DIR` | `.`            | I/O directories                        |
-| `TMP_DIR`                  | same as output | Intermediate DuckDB + Parquet location |
-| `THREADS`                  | `4`            | DuckDB thread count per connection     |
-| `OVERWRITE`                | `False`        | Overwrite existing output              |
+| Setting                    | Default                    | Description                                                   |
+| -------------------------- | -------------------------- | ------------------------------------------------------------- |
+| `DISTANCE`                 | `0.0002`                   | Point spacing in decimal degrees                              |
+| `INPUT_DIR` / `OUTPUT_DIR` | `../inputs` / `../outputs` | I/O directories (relative to `app/`)                          |
+| `TMP_DIR`                  | `../tmp`                   | Intermediate DuckDB + Parquet location                        |
+| `THREADS`                  | `4`                        | DuckDB thread count per connection                            |
+| `OVERWRITE`                | `False`                    | Overwrite existing output                                     |
+| `DEBUG`                    | `False`                    | Keep intermediate tables; export all to Parquet               |
+| `PROFILE`                  | `False`                    | Log timing + memory delta per query                           |
+| `IN_MEMORY`                | `False`                    | Use in-memory DuckDB instead of file-backed                   |
+| `STAGE`                    | (none)                     | Run only one named stage (inputs/lines/attempt/merge/outputs) |
 
 ### Key Patterns
 
-- **DuckDB spatial extension** handles all geometry operations (`ST_*` functions). One file-backed connection is created per input file in `utils.py`.
+- **DuckDB spatial extension** handles all geometry operations (`ST_*` functions). One connection (file-backed by default, or in-memory with `--in-memory`) is created per input file in `utils.py` and returned as a `ProfiledConnection` proxy that logs timing and memory per query when `--profile` is set.
 - **DuckDB tables as IPC** — stages read and write named tables on the shared connection; no Parquet between stages.
 - **Topology validation** in `topology.py` (`check_overlaps`, `check_gaps`, `check_missing_rows`) runs after Voronoi generation and again before final output.
 - **Geometry column names**: `geom` in DuckDB tables, `geometry` in final output.

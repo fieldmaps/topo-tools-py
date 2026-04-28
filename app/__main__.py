@@ -1,7 +1,10 @@
 """Entry point for edge-extender, discovers inputs and runs the pipeline."""
 
+import signal
 from logging import getLogger
 from pathlib import Path
+from types import FrameType
+from typing import Never
 
 from . import attempt, inputs, lines, merge, outputs
 from .config import (
@@ -17,26 +20,17 @@ from .config import (
     stage,
     tmp_dir,
 )
-from .utils import ProfiledConnection, cleanup_tmp, export_debug_tables, get_connection
+from .utils import cleanup_tmp, export_debug_tables, get_connection
 
 logger = getLogger(__name__)
 
-_STAGES = ["inputs", "lines", "attempt", "merge", "outputs"]
-
-
-def _run_stage(conn: ProfiledConnection, name: str, path: Path, s: str) -> None:
-    if profile:
-        logger.info("=== %s ===", s)
-    if s == "inputs":
-        inputs.main(conn, name, path)
-    elif s == "lines":
-        lines.main(conn, name)
-    elif s == "attempt":
-        attempt.main(conn, name)
-    elif s == "merge":
-        merge.main(conn, name)
-    elif s == "outputs":
-        outputs.main(conn, name, path)
+_STAGES = {
+    "inputs": inputs.main,
+    "lines": lambda conn, name, _path: lines.main(conn, name),
+    "attempt": lambda conn, name, _path: attempt.main(conn, name),
+    "merge": lambda conn, name, _path: merge.main(conn, name),
+    "outputs": outputs.main,
+}
 
 
 def _run_file(path: Path) -> None:
@@ -45,14 +39,23 @@ def _run_file(path: Path) -> None:
     if not stage:
         cleanup_tmp(name, parquet=True)
     conn = get_connection(name)
+
+    def _interrupt(_sig: int, _frame: FrameType | None) -> Never:
+        conn.interrupt()
+        raise KeyboardInterrupt
+
+    old_handler = signal.signal(signal.SIGINT, _interrupt)
     try:
-        for s in _STAGES:
+        for s, fn in _STAGES.items():
             if not stage or stage == s:
-                _run_stage(conn, name, path, s)
+                if profile:
+                    logger.info("=== %s ===", s)
+                fn(conn, name, path)
         if debug:
             export_debug_tables(conn)
         logger.info("done: %s", name)
     finally:
+        signal.signal(signal.SIGINT, old_handler)
         conn.close()
         if not stage and not debug:
             cleanup_tmp(name)
