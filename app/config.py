@@ -43,7 +43,6 @@ parser.add_argument(
     default=getenv("STAGE"),
     choices=["inputs", "lines", "attempt", "merge", "outputs"],
 )
-
 args = parser.parse_args()
 
 distance = Decimal(args.distance)

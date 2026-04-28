@@ -131,25 +131,37 @@ RSS peak at 1 thread is **5.5 GB**.
 
 ## RTREE index experiment
 
-Tested adding explicit RTREE indexes on two additional join sites:
+Tested adding explicit RTREE indexes at every candidate spatial join site across the full
+pipeline (Chile admin3, default threads). Three configurations:
 
-- `lines.py`: index on `_02_tmp1.geom` for the LATERAL neighbor join
-- `voronoi.py`: index on `_04_tmp1.geom` for the point→Voronoi-cell fid assignment
+- **none** — no RTREEs anywhere
+- **merge** — RTREE only on `_05_tmp3` (former default)
+- **all** — RTREEs on `_01`, `_02_tmp1`, `_04_tmp1`, and `_05_tmp3`
 
-Result: **no improvement; Chile was ~14 seconds slower.**
+**Wall time (seconds) at key queries:**
 
-**Why they didn't help:**
+| Query | none | merge | all | join type |
+|---|---|---|---|---|
+| `_02a` | 11.8 | 11.1 | 11.2 | LATERAL + ST_Intersects on `_02_tmp1` |
+| `_02b` | 18.0 | 17.6 | 17.1 | LATERAL + ST_Intersects on `_02_tmp1` |
+| `_04_tmp1` index | — | — | **0.9** | index build cost |
+| `_04_tmp2` | **50.3** | **55.9** | **57.3** | ST_Intersects join on `_04_tmp1` |
+| `_05_tmp3` index | — | 0.03 | 0.02 | index build cost |
+| `_05` | **6.1** | **6.8** | **6.0** | SPATIAL_JOIN on `_05_tmp3` |
 
-- `voronoi.py` fid join: DuckDB already rewrites any `JOIN … ON ST_Intersects(…)` to its
-  internal `SPATIAL_JOIN` operator, which builds its own temporary spatial index at query
-  time. An explicit RTREE creates a second index the planner must consider, adding overhead
-  without benefit.
-- `lines.py` LATERAL join: DuckDB cannot use a table-level RTREE index inside a correlated
-  LATERAL subquery. Each invocation is evaluated as a correlated loop, not a bulk spatial
-  join, so the index is built and never probed. Pure overhead.
+**Result: no improvement at any site. The `_04_tmp1` RTREE is net negative.**
 
-The RTREE on `_05_tmp3` in `merge.py` was added speculatively during the `_05` memory
-investigation and also showed no improvement — consistent with the above. It is kept
-because materializing `_05_tmp3` as a real table (required to create any index) is itself
-the structural improvement: it decouples noding memory from the SPATIAL_JOIN, allowing
-DuckDB to release noding working memory before the join starts.
+- `_04_tmp2` went from 50.3s → 57.3s with the index: 0.9s build cost plus a slower join,
+  because DuckDB already rewrites `JOIN … ON ST_Intersects(…)` to its internal
+  `SPATIAL_JOIN` operator with its own temporary spatial index. An explicit RTREE creates
+  a second index the planner must consider.
+- `_02a`/`_02b`: LATERAL subqueries evaluate as correlated loops; DuckDB cannot use a
+  table-level RTREE inside them. The index is built and never probed.
+- `_05`: times of 6.1s / 6.8s / 6.0s across none/merge/all are noise. The RTREE on
+  `_05_tmp3` provided no measurable benefit.
+- `_05_tmp1` NOT EXISTS filter against `_01`: indistinguishable across configs.
+
+**The `_05_tmp3` RTREE has been removed.** The structural improvement in `merge.py` is
+materializing `_05_tmp3` as a real table — that decouples ST_Node/ST_Polygonize working
+memory from the subsequent SPATIAL_JOIN regardless of whether any index exists on it.
+The index itself was always noise.

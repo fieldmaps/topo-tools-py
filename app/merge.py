@@ -109,8 +109,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp1"')
 
     # Split noding+polygonizing from the spatial join so DuckDB can release the
-    # noding working memory before SPATIAL_JOIN begins. An RTREE index is added
-    # after materialization since CTEs cannot be indexed.
+    # noding working memory before SPATIAL_JOIN begins.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_05_tmp3" AS
         WITH
@@ -125,10 +124,6 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         SELECT UNNEST(ST_Dump(ST_Polygonize(list(geom)))).geom AS geom
         FROM noded
     """)
-    conn.execute(
-        f'CREATE INDEX "{name}_05_tmp3_rtree" ON "{name}_05_tmp3" USING RTREE (geom)'
-    )
-
     if not debug:
         conn.execute(f'DROP TABLE IF EXISTS "{name}_02b"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp2"')
