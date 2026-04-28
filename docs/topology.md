@@ -77,13 +77,13 @@ This replaces the original `ST_Union_Agg(geom) FROM _01` union approach. The uni
 
 ### Approaches ruled out
 
-| Approach | Reason rejected |
-| --- | --- |
-| `ST_Union_Agg(_01)` | Materialises large intermediate geometry; expensive in WASM/Docker |
-| `ST_ConvexHull(_01)` | Fast but incorrect for concave geographies (e.g. Chile coastline) |
-| `ST_Polygonize(_02)` | Profiled as more expensive than the union |
-| `is_extension` flag on Voronoi cells | All Voronoi cells straddle the interior/extension boundary — seed points are on exterior polygon edges, so cells spread both inward and outward. No cell is purely interior or purely exterior |
-| Endpoint test (`ST_StartPoint` / `ST_EndPoint`) | Fails for the narrow-notch edge case described above |
+| Approach                                        | Reason rejected                                                                                                                                                                                |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ST_Union_Agg(_01)`                             | Materialises large intermediate geometry; expensive in WASM/Docker                                                                                                                             |
+| `ST_ConvexHull(_01)`                            | Fast but incorrect for concave geographies (e.g. Chile coastline)                                                                                                                              |
+| `ST_Polygonize(_02)`                            | Profiled as more expensive than the union                                                                                                                                                      |
+| `is_extension` flag on Voronoi cells            | All Voronoi cells straddle the interior/extension boundary — seed points are on exterior polygon edges, so cells spread both inward and outward. No cell is purely interior or purely exterior |
+| Endpoint test (`ST_StartPoint` / `ST_EndPoint`) | Fails for the narrow-notch edge case described above                                                                                                                                           |
 
 ---
 

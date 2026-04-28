@@ -29,6 +29,10 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         ON ST_Intersects(a.geom, b.geom)
     """)
 
+    if not debug:
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_03b"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp1"')
+
     # Union Voronoi cells by fid
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_04_tmp3" AS
@@ -37,11 +41,8 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         GROUP BY fid
     """)
 
+    if not debug:
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp2"')
+
     conn.execute(f'DROP TABLE IF EXISTS "{name}_04"')
     conn.execute(f'ALTER TABLE "{name}_04_tmp3" RENAME TO "{name}_04"')
-
-    if not debug:
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_03b"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp1"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp2"')
-    conn.execute("CHECKPOINT")

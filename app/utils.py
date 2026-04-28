@@ -132,7 +132,8 @@ def get_connection(name: str) -> ProfiledConnection:
     conn.execute("SET enable_progress_bar = false")
     conn.execute("SET geometry_always_xy = true")
     conn.execute("SET preserve_insertion_order = false")
-    conn.execute(f"SET threads = {num_threads}")
+    if num_threads is not None:
+        conn.execute(f"SET threads = {num_threads}")
     return ProfiledConnection(conn)
 
 

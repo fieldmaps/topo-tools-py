@@ -62,7 +62,7 @@ The pipeline has 5 sequential stages, each a standalone module in `app/`. All st
 | `DISTANCE`                 | `0.0002`                   | Point spacing in decimal degrees                              |
 | `INPUT_DIR` / `OUTPUT_DIR` | `../inputs` / `../outputs` | I/O directories (relative to `app/`)                          |
 | `TMP_DIR`                  | `../tmp`                   | Intermediate DuckDB + Parquet location                        |
-| `THREADS`                  | `4`                        | DuckDB thread count per connection                            |
+| `THREADS`                  | (unset)                    | DuckDB thread count; unset defers to DuckDB default           |
 | `OVERWRITE`                | `False`                    | Overwrite existing output                                     |
 | `DEBUG`                    | `False`                    | Keep intermediate tables; export all to Parquet               |
 | `PROFILE`                  | `False`                    | Log timing + memory delta per query                           |

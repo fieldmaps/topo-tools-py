@@ -129,6 +129,10 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         f'CREATE INDEX "{name}_05_tmp3_rtree" ON "{name}_05_tmp3" USING RTREE (geom)'
     )
 
+    if not debug:
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_02b"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp2"')
+
     # One representative interior point per polygon part (ST_Dump handles
     # multipolygons). Used by the SPATIAL_JOIN in _05 to assign each Voronoi cell
     # to the original polygon whose interior point falls inside it.
@@ -175,8 +179,5 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     """)
 
     if not debug:
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_02b"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp2"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp3"')
     conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp4"')
-    conn.execute("CHECKPOINT")

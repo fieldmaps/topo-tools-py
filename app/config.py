@@ -32,7 +32,7 @@ parser.add_argument(
 parser.add_argument("--output-file", default=getenv("OUTPUT_FILE"))
 parser.add_argument("--tmp-dir", default=getenv("TMP_DIR", str(cwd / "../tmp")))
 parser.add_argument("--distance", default=getenv("DISTANCE", "0.0002"))
-parser.add_argument("--threads", default=getenv("THREADS", "4"))
+parser.add_argument("--threads", default=getenv("THREADS"))
 parser.add_argument("--overwrite", **_bool_flag("OVERWRITE"))
 parser.add_argument("--debug", **_bool_flag("DEBUG"))
 parser.add_argument("--profile", **_bool_flag("PROFILE"))
@@ -47,7 +47,7 @@ parser.add_argument(
 args = parser.parse_args()
 
 distance = Decimal(args.distance)
-num_threads = int(args.threads)
+num_threads = int(args.threads) if args.threads is not None else None
 input_dir = Path(args.input_dir)
 _input_file = Path(args.input_file) if args.input_file else None
 input_file = (
