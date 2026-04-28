@@ -37,50 +37,53 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         )
     """)
 
-    # Snap _05_tmp1 endpoints that land within snap_dist of a _02b segment to the
-    # exact closest point on that segment. GEOS intersection arithmetic in
-    # ST_Difference (_05_tmp1) can drift ~1e-7° from original polygon vertices,
-    # preventing ST_Node from creating a proper junction in _05. Per-segment bbox
-    # pre-filter avoids collecting all of _02b into one large geometry, which
-    # caused a ~7 GB peak when called with ST_ClosestPoint against the full
-    # multi-geometry.
+    # Snap _05_tmp1 endpoints that land within snap_dist of a _02b polyline
+    # endpoint (a 3+ polygon corner) to the exact corner. GEOS intersection
+    # arithmetic in ST_Difference (_05_tmp1) can drift ~1e-7° from original
+    # polygon vertices, preventing ST_Node from creating a proper junction in
+    # _05. Snapping to the nearest segment via ST_ClosestPoint can land just
+    # past a corner (when the perpendicular projection falls on the next
+    # segment of the merged polyline), leaving a sub-nanodegree gap that fuses
+    # neighbouring polygons in ST_Polygonize. Snapping to a discrete corner
+    # set guarantees convergence at the exact corner coordinates.
     snap_dist = SNAP_TOLERANCE * 2
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_05_tmp2" AS
         WITH
+        corners AS (
+            SELECT DISTINCT pt FROM (
+                SELECT ST_StartPoint(geom) AS pt FROM "{name}_02b"
+                UNION ALL
+                SELECT ST_EndPoint(geom) FROM "{name}_02b"
+            )
+        ),
         ext AS (
             SELECT ROW_NUMBER() OVER () AS id, geom,
                 ST_StartPoint(geom) AS start_pt,
                 ST_EndPoint(geom) AS end_pt
             FROM "{name}_05_tmp1"
         ),
-        start_bbox AS (
-            SELECT e.id, e.start_pt AS pt, b.geom AS seg
-            FROM ext e CROSS JOIN "{name}_02b" b
-            WHERE ST_X(e.start_pt) BETWEEN ST_XMin(b.geom) - {snap_dist}
-                                       AND ST_XMax(b.geom) + {snap_dist}
-              AND ST_Y(e.start_pt) BETWEEN ST_YMin(b.geom) - {snap_dist}
-                                       AND ST_YMax(b.geom) + {snap_dist}
-        ),
         start_snap AS (
-            SELECT id,
-                MIN_BY(ST_ClosestPoint(seg, pt), ST_Distance(seg, pt)) AS snap_pt
-            FROM start_bbox WHERE ST_Distance(pt, seg) < {snap_dist}
-            GROUP BY id
-        ),
-        end_bbox AS (
-            SELECT e.id, e.end_pt AS pt, b.geom AS seg
-            FROM ext e CROSS JOIN "{name}_02b" b
-            WHERE ST_X(e.end_pt) BETWEEN ST_XMin(b.geom) - {snap_dist}
-                                     AND ST_XMax(b.geom) + {snap_dist}
-              AND ST_Y(e.end_pt) BETWEEN ST_YMin(b.geom) - {snap_dist}
-                                     AND ST_YMax(b.geom) + {snap_dist}
+            SELECT e.id,
+                MIN_BY(c.pt, ST_Distance(c.pt, e.start_pt)) AS snap_pt
+            FROM ext e CROSS JOIN corners c
+            WHERE ST_X(c.pt) BETWEEN ST_X(e.start_pt) - {snap_dist}
+                                 AND ST_X(e.start_pt) + {snap_dist}
+              AND ST_Y(c.pt) BETWEEN ST_Y(e.start_pt) - {snap_dist}
+                                 AND ST_Y(e.start_pt) + {snap_dist}
+              AND ST_Distance(c.pt, e.start_pt) < {snap_dist}
+            GROUP BY e.id
         ),
         end_snap AS (
-            SELECT id,
-                MIN_BY(ST_ClosestPoint(seg, pt), ST_Distance(seg, pt)) AS snap_pt
-            FROM end_bbox WHERE ST_Distance(pt, seg) < {snap_dist}
-            GROUP BY id
+            SELECT e.id,
+                MIN_BY(c.pt, ST_Distance(c.pt, e.end_pt)) AS snap_pt
+            FROM ext e CROSS JOIN corners c
+            WHERE ST_X(c.pt) BETWEEN ST_X(e.end_pt) - {snap_dist}
+                                 AND ST_X(e.end_pt) + {snap_dist}
+              AND ST_Y(c.pt) BETWEEN ST_Y(e.end_pt) - {snap_dist}
+                                 AND ST_Y(e.end_pt) + {snap_dist}
+              AND ST_Distance(c.pt, e.end_pt) < {snap_dist}
+            GROUP BY e.id
         ),
         pts_as_list AS (
             SELECT
