@@ -14,7 +14,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
 
     # Exterior edges = each polygon's boundary minus the union of touching
     # neighbours' boundaries. The lateral join finds neighbours locally so
-    # there is no global ST_Union_Agg over all polygons in the dataset.
+    # there is no global union over all polygons in the dataset.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_02a" AS
         SELECT

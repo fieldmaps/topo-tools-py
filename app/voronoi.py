@@ -35,7 +35,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
 
     # Union Voronoi cells by fid
     conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_04_tmp3" AS
+        CREATE OR REPLACE TABLE "{name}_04" AS
         SELECT fid, ST_Union_Agg(geom) AS geom
         FROM "{name}_04_tmp2"
         GROUP BY fid
@@ -43,6 +43,3 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
 
     if not debug:
         conn.execute(f'DROP TABLE IF EXISTS "{name}_04_tmp2"')
-
-    conn.execute(f'DROP TABLE IF EXISTS "{name}_04"')
-    conn.execute(f'ALTER TABLE "{name}_04_tmp3" RENAME TO "{name}_04"')

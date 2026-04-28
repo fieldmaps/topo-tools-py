@@ -28,7 +28,8 @@ Memory efficiency is a first-class concern. Prefer approaches that minimize inte
 # Install dependencies
 uv sync
 
-# Run the application
+# Run the application (--input-file is joined onto input_dir, so pass filename or absolute path;
+# --overwrite needed when outputs/<name> already exists regardless of --output-file target)
 uv run -m app
 
 # Format and lint
