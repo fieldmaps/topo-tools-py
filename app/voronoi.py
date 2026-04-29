@@ -21,8 +21,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         WITH unique_pts AS (
             SELECT geom FROM "{name}_03b"
             QUALIFY ROW_NUMBER() OVER (
-                PARTITION BY round(ST_X(geom)::DOUBLE, 12),
-                             round(ST_Y(geom)::DOUBLE, 12)
+                PARTITION BY round(ST_X(geom), 12), round(ST_Y(geom), 12)
             ) = 1
         )
         SELECT UNNEST(ST_Dump(

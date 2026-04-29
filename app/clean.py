@@ -43,11 +43,16 @@ from .config import debug
 
 OverlapStrategy = Literal["largest_area", "merge_longest_border"]
 
-# ORDER BY expression that picks the strategy winner per atom. References
-# columns materialised in the candidates CTE: `p_area` and `shared_len`.
-_STRATEGY_ORDER: dict[OverlapStrategy, str] = {
-    "largest_area": "p_area",
-    "merge_longest_border": "shared_len",
+# Per-strategy SQL expression that ranks (atom, fid) candidates. Materialised
+# as the `metric` column in the candidates CTE so QUALIFY can ORDER BY it.
+# Only the chosen strategy's expression is computed — `merge_longest_border`'s
+# `ST_Intersection(ST_Boundary, ST_Boundary)` is the most expensive op in the
+# whole CTE, so skipping it under `largest_area` is a real win on dirty data.
+_STRATEGY_METRIC: dict[OverlapStrategy, str] = {
+    "largest_area": "ST_Area(p.geom)",
+    "merge_longest_border": (
+        "ST_Length(ST_Intersection(ST_Boundary(a.atom), ST_Boundary(p.geom)))"
+    ),
 }
 
 logger = getLogger(__name__)
@@ -82,7 +87,7 @@ def main(  # noqa: PLR0913 - mirrors ST_CoverageClean signature
             SELECT ST_CoverageInvalidEdges_Agg(geom) AS g FROM "{name}_01"
         )
         SELECT g IS NOT NULL AND NOT ST_IsEmpty(g) FROM agg
-    """).fetchone()[0]
+    """).fetchall()[0][0]
     # Persistent tracker — merge.py uses this to know which polygons need
     # their full `_02a` exterior edges added to the polygonize input. Empty if
     # clean exited early (uniform interface).
@@ -94,7 +99,7 @@ def main(  # noqa: PLR0913 - mirrors ST_CoverageClean signature
         logger.info("clean: no coverage errors in %s_01, skipping", name)
         return
 
-    strategy_order = _STRATEGY_ORDER[overlap_strategy]
+    strategy_metric = _STRATEGY_METRIC[overlap_strategy]
 
     # Full snapshot of `_01` (attributes AND geometry). Geometry is preserved so
     # that any polygon which ends up with no assigned atoms (e.g. fully
@@ -132,8 +137,8 @@ def main(  # noqa: PLR0913 - mirrors ST_CoverageClean signature
         )
     """)
 
-    # One representative point per polygon part. Multipolygons contribute one
-    # row per part. Used to attribute each polygonize atom to a fid.
+    # One representative point per polygon part. Same shape as merge.py's
+    # `_05_tmp4` — both attribute downstream cells to a fid via point-in-atom.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_01_tmp2" AS
         WITH parts AS (
@@ -167,34 +172,17 @@ def main(  # noqa: PLR0913 - mirrors ST_CoverageClean signature
 
     # Atom-to-fid assignment.
     #
-    # candidates: every (atom, fid) pair where the polygon's representative
-    #   point is inside the atom. Multipolygon parts may produce multiple
-    #   candidate rows for the same (aid, fid) — `DISTINCT` collapses them.
-    #   `p_area` and `shared_len` are precomputed per row so the strategy
-    #   ORDER BY can be a column reference (works inside QUALIFY).
-    #
-    # interior_winners: one row per atom that has at least one candidate. Picks
-    #   the strategy winner (largest_area or merge_longest_border). Atoms with
-    #   exactly one candidate trivially keep that candidate.
-    #
-    # gap_atoms: atoms with NO candidates. These are interior holes of the
-    #   coverage (slivers OR lakes) plus any "outside the dataset" rings (rare
-    #   for sane inputs).
-    #
-    # sliver_atoms: gap atoms that are NOT inside a preserved lake.
-    #
-    # sliver_assigned: each sliver goes to its longest-border neighbour.
-    #   Hardcoded — `largest_area` is meaningless for gaps (a gap is between
-    #   polygons, not contained in them).
+    # `DISTINCT` in candidates collapses multipart polygons that produce more
+    # than one (aid, fid) candidate row. Sliver-to-neighbour uses longest
+    # shared boundary regardless of `overlap_strategy`: gaps live between
+    # polygons, not inside them, so "largest area" is meaningless for slivers.
+    # See merge.py for the bbox-prefilter rationale (avoids SPATIAL_JOIN OOM).
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_01_tmp4" AS
         WITH
         candidates AS (
             SELECT DISTINCT a.aid, a.atom, pt.fid,
-                ST_Area(p.geom) AS p_area,
-                ST_Length(ST_Intersection(
-                    ST_Boundary(a.atom), ST_Boundary(p.geom)
-                )) AS shared_len
+                {strategy_metric} AS metric
             FROM "{name}_01_tmp3" a
             JOIN "{name}_01_tmp2" pt
               ON ST_X(pt.pt) >= ST_XMin(a.atom)
@@ -208,7 +196,7 @@ def main(  # noqa: PLR0913 - mirrors ST_CoverageClean signature
             SELECT aid, atom, fid
             FROM candidates
             QUALIFY ROW_NUMBER() OVER (
-                PARTITION BY aid ORDER BY {strategy_order} DESC, fid ASC
+                PARTITION BY aid ORDER BY metric DESC, fid ASC
             ) = 1
         ),
         gap_atoms AS (
@@ -266,9 +254,8 @@ def main(  # noqa: PLR0913 - mirrors ST_CoverageClean signature
         LEFT JOIN per_fid p ON a.fid = p.fid
     """)
 
-    # Populate the persistent modified-fids tracker. A polygon is "modified"
-    # if its cleaned geometry differs from the snapshot — covers losers, gap
-    # winners, and any polygon affected by the polygonize+reattribute pass.
+    # Populate the persistent modified-fids tracker — every fid whose cleaned
+    # geometry differs from the snapshot.
     conn.execute(f"""--sql
         INSERT INTO "{name}_01_modified_fids"
         SELECT a.fid
@@ -277,5 +264,8 @@ def main(  # noqa: PLR0913 - mirrors ST_CoverageClean signature
     """)
 
     if not debug:
-        for n in range(5):
-            conn.execute(f'DROP TABLE IF EXISTS "{name}_01_tmp{n}"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_01_tmp0"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_01_tmp1"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_01_tmp2"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_01_tmp3"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_01_tmp4"')

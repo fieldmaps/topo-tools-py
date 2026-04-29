@@ -125,13 +125,15 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     #
     # Polygonize input is `_02b` (interior shared edges) + `_05_tmp2`
     # (extension boundary), plus `_02a` (per-fid exterior edges) ONLY for
-    # polygons clean.py modified. Clean's `ST_Difference` introduces sub-pixel
-    # boundary noise that leaves gaps in `_02b` for those polygons; their
-    # `_02a` rows close those gaps. For unmodified polygons (the whole dataset
-    # on clean inputs like Chile), `_02a` is excluded — the original
-    # `_02b` + `_05_tmp2` topology is exact, and adding all of `_02a` would
-    # double the boundary line count and double cell count from polygonize,
-    # which OOMs at scale on long-coastline inputs.
+    # polygons clean.py modified. Clean's polygonize-and-reattribute pass adds
+    # crossing vertices to a modified polygon's boundary that are NOT present
+    # in the points used to compute `_05_tmp2`'s extension boundary, leaving
+    # sub-pixel gaps where the polygon meets the extension area; `_02a` for
+    # the affected polygons closes the cell from the polygon's own boundary.
+    # For unmodified polygons (entire dataset on clean inputs like Chile),
+    # `_02b` + `_05_tmp2` already closes everything — adding all of `_02a`
+    # there would near-duplicate `_05_tmp2` along long coastlines and explode
+    # cell count via thin sliver atoms, OOM'ing the SPATIAL_JOIN.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_05_tmp3" AS
         WITH
@@ -179,9 +181,8 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     #
     # Fallback for unmatched (extension) cells uses `_04` — the per-fid Voronoi
     # territory. Each unmatched cell's centroid is inside exactly one Voronoi
-    # cell, identifying the nearest fid. This avoids the previous
-    # `CROSS JOIN _05_tmp4 + ST_Distance` which OOM'd at ~M*N rows when the
-    # polygonize input produced many extension atoms (e.g. Chile's coastline).
+    # cell, giving the nearest fid in O(N+M) instead of O(N*M) from a
+    # CROSS JOIN with ST_Distance ranking.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_05" AS
         WITH
