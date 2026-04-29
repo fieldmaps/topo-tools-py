@@ -64,7 +64,7 @@ The pipeline has 6 sequential stages, each a standalone module in `app/`. All st
 | `DISTANCE`                 | `0.0002`                   | Point spacing in decimal degrees                              |
 | `GAP_MAX_WIDTH`            | `0.0001`                   | Sub-pixel safety net: holes with max-inscribed-diameter ≤ this are absorbed regardless of shape (catches small round artifacts) |
 | `GAP_MAX_THINNESS`         | `0.05`                     | Polsby-Popper threshold (`4πA/P²`): primary sliver discriminator. Holes with PP ≤ this are absorbed. 0.05 ≈ 1:30 aspect ratio; intentional shapes (squares ≈ 0.79) easily preserved |
-| `OVERLAP_STRATEGY`         | `largest_area`             | Overlap loser selection in clean stage; `largest_area` or `merge_longest_border` |
+| `OVERLAP_STRATEGY`         | `merge_longest_border`     | Overlap loser selection in clean stage; `merge_longest_border` (PostGIS default) or `largest_area` |
 | `INPUT_DIR` / `OUTPUT_DIR` | `../inputs` / `../outputs` | I/O directories (relative to `app/`)                          |
 | `TMP_DIR`                  | `../tmp`                   | Intermediate DuckDB + Parquet location                        |
 | `THREADS`                  | (unset)                    | DuckDB thread count; unset defers to DuckDB default           |

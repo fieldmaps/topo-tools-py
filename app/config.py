@@ -36,7 +36,7 @@ parser.add_argument("--gap-max-width", default=getenv("GAP_MAX_WIDTH", "0.0001")
 parser.add_argument("--gap-max-thinness", default=getenv("GAP_MAX_THINNESS", "0.05"))
 parser.add_argument(
     "--overlap-strategy",
-    default=getenv("OVERLAP_STRATEGY", "largest_area"),
+    default=getenv("OVERLAP_STRATEGY", "merge_longest_border"),
     choices=["largest_area", "merge_longest_border"],
 )
 parser.add_argument("--threads", default=getenv("THREADS"))
