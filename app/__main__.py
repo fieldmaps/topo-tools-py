@@ -6,15 +6,18 @@ from pathlib import Path
 from types import FrameType
 from typing import Never
 
-from . import attempt, inputs, lines, merge, outputs
+from . import attempt, clean, inputs, lines, merge, outputs
 from .config import (
     FORMATS,
     debug,
     distance,
+    gap_max_thinness,
+    gap_max_width,
     in_memory,
     input_dir,
     input_file,
     output_dir,
+    overlap_strategy,
     overwrite,
     profile,
     stage,
@@ -26,6 +29,13 @@ logger = getLogger(__name__)
 
 _STAGES = {
     "inputs": inputs.main,
+    "clean": lambda conn, name, _path: clean.main(
+        conn,
+        name,
+        gap_maximum_width=gap_max_width,
+        gap_max_thinness=gap_max_thinness,
+        overlap_strategy=overlap_strategy,
+    ),
     "lines": lambda conn, name, _path: lines.main(conn, name),
     "attempt": lambda conn, name, _path: attempt.main(conn, name),
     "merge": lambda conn, name, _path: merge.main(conn, name),
@@ -34,6 +44,14 @@ _STAGES = {
 
 _STAGE_TABLES = {
     "inputs": ["{n}_01"],
+    "clean": [
+        "{n}_01",
+        "{n}_01_tmp0",
+        "{n}_01_tmp1",
+        "{n}_01_tmp2",
+        "{n}_01_tmp3",
+        "{n}_01_tmp4",
+    ],
     "lines": ["{n}_02a", "{n}_02b"],
     "attempt": ["{n}_03a", "{n}_03b", "{n}_04", "{n}_04_tmp1", "{n}_04_tmp2"],
     "merge": ["{n}_05", "{n}_05_tmp1", "{n}_05_tmp2", "{n}_05_tmp3", "{n}_05_tmp4"],
@@ -75,7 +93,14 @@ def _run_file(path: Path) -> None:
 def main() -> None:
     """Run main function."""
     logger.info(
-        "--distance=%s --profile=%s --in-memory=%s", distance, profile, in_memory
+        "--distance=%s --gap-max-width=%s --gap-max-thinness=%s "
+        "--overlap-strategy=%s --profile=%s --in-memory=%s",
+        distance,
+        gap_max_width,
+        gap_max_thinness,
+        overlap_strategy,
+        profile,
+        in_memory,
     )
     files = [input_file] if input_file else sorted(input_dir.iterdir())
     for path in files:

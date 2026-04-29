@@ -1,0 +1,271 @@
+"""DuckDB-native equivalent of GEOS ST_CoverageClean.
+
+Cleans coverage errors in `_01` by:
+
+1. Identifying which interior holes of `ST_Union_Agg(_01)` are lakes (preserved)
+   versus slivers (absorbed into a neighbour) without modifying any original
+   geometry. Classification uses two scale-invariant gates (max-inscribed-circle
+   diameter; Polsby-Popper compactness).
+
+2. Turning `_01` into lines via `ST_Boundary`, then `ST_Node` + `ST_Polygonize`
+   to produce atomic regions whose boundaries are made entirely of original
+   polygon vertices (plus crossing vertices added by `ST_Node` — never moved,
+   only inserted, and shared identically between every atom that touches the
+   crossing).
+
+3. Joining atoms with each polygon's representative point to assign each atom
+   to a fid. Atoms that match multiple polygons (overlap regions) go to the
+   `overlap_strategy` winner. Atoms that match no polygon are gaps — slivers
+   go to their longest-border neighbour, lakes are skipped.
+
+4. `ST_Union_Agg`-ing atoms per fid for the cleaned `_01`.
+
+The crucial property versus a per-loser `ST_Difference` approach: every shared
+edge between adjacent cleaned polygons inherits its coordinates from the same
+`ST_Polygonize` output, so `lines.py`'s exact `ST_Intersection` matches them
+without sub-pixel residue. Modifications to `_01` are only made where dirty
+input topology demands them; clean coverages take the early-exit path and pass
+through bit-for-bit.
+
+This module is the swap boundary: when DuckDB-spatial wraps GEOS 3.13's
+`coverage_clean`, the body of `main` collapses to a single
+`SELECT ST_CoverageClean(list(geom), ...)` call. Signature mirrors PostGIS
+`ST_CoverageClean(geom_array, snapping_distance, gap_maximum_width,
+overlap_merge_strategy)` so the swap is a body-only change.
+"""
+
+from logging import getLogger
+from typing import Literal
+
+from duckdb import DuckDBPyConnection
+
+from .config import debug
+
+OverlapStrategy = Literal["largest_area", "merge_longest_border"]
+
+# Per-strategy SQL expression that ranks (atom, fid) candidates. Materialised
+# as the `metric` column in the candidates CTE so QUALIFY can ORDER BY it.
+# Only the chosen strategy's expression is computed — `merge_longest_border`'s
+# `ST_Intersection(ST_Boundary, ST_Boundary)` is the most expensive op in the
+# whole CTE, so skipping it under `largest_area` is a real win on dirty data.
+_STRATEGY_METRIC: dict[OverlapStrategy, str] = {
+    "largest_area": "ST_Area(p.geom)",
+    "merge_longest_border": (
+        "ST_Length(ST_Intersection(ST_Boundary(a.atom), ST_Boundary(p.geom)))"
+    ),
+}
+
+logger = getLogger(__name__)
+
+
+def main(  # noqa: PLR0913 - mirrors ST_CoverageClean signature
+    conn: DuckDBPyConnection,
+    name: str,
+    *,
+    snapping_distance: float = 0.0,  # noqa: ARG001 - reserved for ST_CoverageClean swap
+    gap_maximum_width: float = 0.0001,
+    gap_max_thinness: float = 0.05,
+    overlap_strategy: OverlapStrategy = "largest_area",
+) -> None:
+    """Clean coverage errors in `_01` via polygonize-and-reattribute.
+
+    A hole is treated as a fillable sliver if EITHER:
+      - its max-inscribed-circle diameter ≤ ``gap_maximum_width`` (small
+        round artifact, sub-pixel safety net), OR
+      - its Polsby-Popper compactness ``4πA/P²`` ≤ ``gap_max_thinness``
+        (stringy/elongated shape, primary discriminator).
+
+    Lakes and intentional small wedges are large AND compact — they fail
+    both gates and are preserved as holes in the cleaned coverage.
+    """
+    # Early exit when the input is already a valid coverage. ST_CoverageInvalidEdges
+    # flags overlaps and unmatched shared edges (sliver-gap boundaries) but does
+    # NOT flag legitimate interior holes like lakes, so a dataset whose only
+    # holes are lakes returns NULL here and skips cleaning.
+    has_errors = conn.execute(f"""--sql
+        WITH agg AS (
+            SELECT ST_CoverageInvalidEdges_Agg(geom) AS g FROM "{name}_01"
+        )
+        SELECT g IS NOT NULL AND NOT ST_IsEmpty(g) FROM agg
+    """).fetchall()[0][0]
+    # Persistent tracker — merge.py uses this to know which polygons need
+    # their full `_02a` exterior edges added to the polygonize input. Empty if
+    # clean exited early (uniform interface).
+    conn.execute(f"""--sql
+        CREATE OR REPLACE TABLE "{name}_01_modified_fids" (fid INTEGER)
+    """)
+
+    if not has_errors:
+        logger.info("clean: no coverage errors in %s_01, skipping", name)
+        return
+
+    strategy_metric = _STRATEGY_METRIC[overlap_strategy]
+
+    # Full snapshot of `_01` (attributes AND geometry). Geometry is preserved so
+    # that any polygon which ends up with no assigned atoms (e.g. fully
+    # contained by a strategy winner — unusual) can fall back to its original
+    # geom rather than disappearing from the output.
+    conn.execute(f"""--sql
+        CREATE OR REPLACE TABLE "{name}_01_tmp0" AS
+        SELECT * FROM "{name}_01"
+    """)
+
+    # Lakes: interior rings of the union that are large AND compact (fail BOTH
+    # the width and thinness gates). These are preserved as holes — atoms
+    # falling inside them are not assigned to any fid.
+    conn.execute(f"""--sql
+        CREATE OR REPLACE TABLE "{name}_01_tmp1" AS
+        WITH unioned AS (
+            SELECT ST_Union_Agg(geom) AS u FROM "{name}_01"
+        ),
+        shells AS (
+            SELECT UNNEST(ST_Dump(u)).geom AS shell FROM unioned
+        ),
+        holes AS (
+            SELECT ST_MakePolygon(ST_InteriorRingN(shell, n)) AS hole_geom
+            FROM shells, generate_series(1, ST_NumInteriorRings(shell)) AS s(n)
+            WHERE ST_NumInteriorRings(shell) > 0
+        )
+        SELECT hole_geom
+        FROM holes
+        WHERE NOT (
+            2 * (ST_MaximumInscribedCircle(hole_geom)).radius
+                <= {gap_maximum_width!r}
+            OR 4 * pi() * ST_Area(hole_geom)
+                / NULLIF(pow(ST_Perimeter(hole_geom), 2), 0)
+                <= {gap_max_thinness!r}
+        )
+    """)
+
+    # One representative point per polygon part. Same shape as merge.py's
+    # `_05_tmp4` — both attribute downstream cells to a fid via point-in-atom.
+    conn.execute(f"""--sql
+        CREATE OR REPLACE TABLE "{name}_01_tmp2" AS
+        WITH parts AS (
+            SELECT fid, UNNEST(ST_Dump(geom)).geom AS part_geom
+            FROM "{name}_01"
+        )
+        SELECT fid, ST_PointOnSurface(part_geom) AS pt
+        FROM parts
+    """)
+
+    # Atomic regions from `ST_Node` + `ST_Polygonize` over every polygon's
+    # boundary. ST_Node only ADDS crossing vertices — it never moves an
+    # existing one — so unaffected polygon edges keep their original vertices
+    # exactly, and every atom that touches a crossing inherits identical
+    # coordinates from the same ST_Node output. Adjacent polygons therefore
+    # share their cleaned-coverage boundaries vertex-for-vertex.
+    conn.execute(f"""--sql
+        CREATE OR REPLACE TABLE "{name}_01_tmp3" AS
+        WITH lines AS (
+            SELECT ST_Boundary(geom) AS line FROM "{name}_01"
+        ),
+        noded AS (
+            SELECT ST_Node(ST_Collect(list(line))) AS line FROM lines
+        ),
+        atoms AS (
+            SELECT UNNEST(ST_Dump(ST_Polygonize(list(line)))).geom AS atom
+            FROM noded
+        )
+        SELECT ROW_NUMBER() OVER () AS aid, atom FROM atoms
+    """)
+
+    # Atom-to-fid assignment.
+    #
+    # `DISTINCT` in candidates collapses multipart polygons that produce more
+    # than one (aid, fid) candidate row. Sliver-to-neighbour uses longest
+    # shared boundary regardless of `overlap_strategy`: gaps live between
+    # polygons, not inside them, so "largest area" is meaningless for slivers.
+    # See merge.py for the bbox-prefilter rationale (avoids SPATIAL_JOIN OOM).
+    conn.execute(f"""--sql
+        CREATE OR REPLACE TABLE "{name}_01_tmp4" AS
+        WITH
+        candidates AS (
+            SELECT DISTINCT a.aid, a.atom, pt.fid,
+                {strategy_metric} AS metric
+            FROM "{name}_01_tmp3" a
+            JOIN "{name}_01_tmp2" pt
+              ON ST_X(pt.pt) >= ST_XMin(a.atom)
+             AND ST_X(pt.pt) <= ST_XMax(a.atom)
+             AND ST_Y(pt.pt) >= ST_YMin(a.atom)
+             AND ST_Y(pt.pt) <= ST_YMax(a.atom)
+             AND ST_Within(pt.pt, a.atom)
+            JOIN "{name}_01" p ON p.fid = pt.fid
+        ),
+        interior_winners AS (
+            SELECT aid, atom, fid
+            FROM candidates
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY aid ORDER BY metric DESC, fid ASC
+            ) = 1
+        ),
+        gap_atoms AS (
+            SELECT a.aid, a.atom
+            FROM "{name}_01_tmp3" a
+            WHERE NOT EXISTS (
+                SELECT 1 FROM "{name}_01_tmp2" pt
+                WHERE ST_Within(pt.pt, a.atom)
+            )
+        ),
+        sliver_atoms AS (
+            SELECT g.aid, g.atom
+            FROM gap_atoms g
+            WHERE NOT EXISTS (
+                SELECT 1 FROM "{name}_01_tmp1" lake
+                WHERE ST_Within(ST_PointOnSurface(g.atom), lake.hole_geom)
+            )
+        ),
+        sliver_assigned AS (
+            SELECT s.aid, s.atom, p.fid
+            FROM sliver_atoms s
+            JOIN "{name}_01" p
+              ON ST_XMax(s.atom) >= ST_XMin(p.geom)
+             AND ST_XMin(s.atom) <= ST_XMax(p.geom)
+             AND ST_YMax(s.atom) >= ST_YMin(p.geom)
+             AND ST_YMin(s.atom) <= ST_YMax(p.geom)
+             AND ST_Intersects(ST_Boundary(s.atom), ST_Boundary(p.geom))
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY s.aid ORDER BY
+                    ST_Length(ST_Intersection(
+                        ST_Boundary(s.atom), ST_Boundary(p.geom)
+                    )) DESC,
+                    p.fid ASC
+            ) = 1
+        )
+        SELECT aid, atom, fid FROM interior_winners
+        UNION ALL
+        SELECT aid, atom, fid FROM sliver_assigned
+    """)
+
+    # Rewrite `_01`: union assigned atoms per fid, re-attach attributes. A
+    # polygon with no assigned atoms (e.g. swallowed entirely by a larger
+    # strategy winner — rare) falls back to its original geometry from the
+    # snapshot, so no row is ever silently dropped here.
+    conn.execute(f"""--sql
+        CREATE OR REPLACE TABLE "{name}_01" AS
+        WITH per_fid AS (
+            SELECT fid, ST_Union_Agg(atom) AS new_geom
+            FROM "{name}_01_tmp4"
+            GROUP BY fid
+        )
+        SELECT a.* EXCLUDE (geom),
+               COALESCE(p.new_geom, a.geom) AS geom
+        FROM "{name}_01_tmp0" a
+        LEFT JOIN per_fid p ON a.fid = p.fid
+    """)
+
+    # Populate the persistent modified-fids tracker — every fid whose cleaned
+    # geometry differs from the snapshot.
+    conn.execute(f"""--sql
+        INSERT INTO "{name}_01_modified_fids"
+        SELECT a.fid
+        FROM "{name}_01" a JOIN "{name}_01_tmp0" o ON a.fid = o.fid
+        WHERE NOT ST_Equals(a.geom, o.geom)
+    """)
+
+    if not debug:
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_01_tmp0"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_01_tmp1"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_01_tmp2"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_01_tmp3"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_01_tmp4"')

@@ -32,6 +32,13 @@ parser.add_argument(
 parser.add_argument("--output-file", default=getenv("OUTPUT_FILE"))
 parser.add_argument("--tmp-dir", default=getenv("TMP_DIR", str(cwd / "../tmp")))
 parser.add_argument("--distance", default=getenv("DISTANCE", "0.0002"))
+parser.add_argument("--gap-max-width", default=getenv("GAP_MAX_WIDTH", "0.0001"))
+parser.add_argument("--gap-max-thinness", default=getenv("GAP_MAX_THINNESS", "0.05"))
+parser.add_argument(
+    "--overlap-strategy",
+    default=getenv("OVERLAP_STRATEGY", "largest_area"),
+    choices=["largest_area", "merge_longest_border"],
+)
 parser.add_argument("--threads", default=getenv("THREADS"))
 parser.add_argument("--overwrite", **_bool_flag("OVERWRITE"))
 parser.add_argument("--debug", **_bool_flag("DEBUG"))
@@ -40,11 +47,14 @@ parser.add_argument("--in-memory", **_bool_flag("IN_MEMORY"))
 parser.add_argument(
     "--stage",
     default=getenv("STAGE"),
-    choices=["inputs", "lines", "attempt", "merge", "outputs"],
+    choices=["inputs", "clean", "lines", "attempt", "merge", "outputs"],
 )
 args = parser.parse_args()
 
 distance = Decimal(args.distance)
+gap_max_width = float(args.gap_max_width)
+gap_max_thinness = float(args.gap_max_thinness)
+overlap_strategy = args.overlap_strategy
 num_threads = int(args.threads) if args.threads is not None else None
 input_dir = Path(args.input_dir)
 _input_file = Path(args.input_file) if args.input_file else None

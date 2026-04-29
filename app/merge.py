@@ -117,13 +117,23 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     """)
 
     if not debug:
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_02a"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_03a"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_04"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp1"')
 
     # Split noding+polygonizing from the spatial join so DuckDB can release the
     # noding working memory before SPATIAL_JOIN begins.
+    #
+    # Polygonize input is `_02b` (interior shared edges) + `_05_tmp2`
+    # (extension boundary), plus `_02a` (per-fid exterior edges) ONLY for
+    # polygons clean.py modified. Clean's polygonize-and-reattribute pass adds
+    # crossing vertices to a modified polygon's boundary that are NOT present
+    # in the points used to compute `_05_tmp2`'s extension boundary, leaving
+    # sub-pixel gaps where the polygon meets the extension area; `_02a` for
+    # the affected polygons closes the cell from the polygon's own boundary.
+    # For unmodified polygons (entire dataset on clean inputs like Chile),
+    # `_02b` + `_05_tmp2` already closes everything — adding all of `_02a`
+    # there would near-duplicate `_05_tmp2` along long coastlines and explode
+    # cell count via thin sliver atoms, OOM'ing the SPATIAL_JOIN.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_05_tmp3" AS
         WITH
@@ -131,6 +141,9 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
             SELECT geom FROM "{name}_02b"
             UNION ALL
             SELECT geom FROM "{name}_05_tmp2"
+            UNION ALL
+            SELECT geom FROM "{name}_02a"
+            WHERE fid IN (SELECT fid FROM "{name}_01_modified_fids")
         ),
         noded AS (
             SELECT ST_Node(ST_Collect(list(geom))) AS geom FROM lines
@@ -139,6 +152,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         FROM noded
     """)
     if not debug:
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_02a"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_02b"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp2"')
 
@@ -164,6 +178,11 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     # planner uses PIECEWISE_MERGE_JOIN with ST_Within applied as a residual
     # FILTER. The bbox predicates are necessary conditions for ST_Within so
     # adding them does not change semantics.
+    #
+    # Fallback for unmatched (extension) cells uses `_04` — the per-fid Voronoi
+    # territory. Each unmatched cell's centroid is inside exactly one Voronoi
+    # cell, giving the nearest fid in O(N+M) instead of O(N*M) from a
+    # CROSS JOIN with ST_Distance ranking.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_05" AS
         WITH
@@ -171,7 +190,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
             SELECT ROW_NUMBER() OVER () AS cid, geom AS vgeom FROM "{name}_05_tmp3"
         ),
         all_joined AS (
-            SELECT c.vgeom, p.* EXCLUDE (pt)
+            SELECT c.cid, c.vgeom, p.* EXCLUDE (pt)
             FROM cells c
             LEFT JOIN "{name}_05_tmp4" AS p
               ON ST_X(p.pt) >= ST_XMin(c.vgeom)
@@ -181,27 +200,32 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
              AND ST_Within(p.pt, c.vgeom)
             QUALIFY ROW_NUMBER() OVER (PARTITION BY c.cid ORDER BY p.fid NULLS LAST) = 1
         ),
-        unmatched AS (
-            SELECT ROW_NUMBER() OVER () AS uid, vgeom
+        unmatched_centroids AS (
+            SELECT cid, vgeom, ST_Centroid(vgeom) AS c_pt
             FROM all_joined WHERE fid IS NULL
         ),
         fallback AS (
             SELECT u.vgeom, p.* EXCLUDE (pt)
-            FROM unmatched u
-            CROSS JOIN "{name}_05_tmp4" p
-            QUALIFY ROW_NUMBER() OVER (
-                PARTITION BY u.uid
-                ORDER BY ST_Distance(ST_Centroid(u.vgeom), p.pt)
-            ) = 1
+            FROM unmatched_centroids u
+            JOIN "{name}_04" v
+              ON ST_X(u.c_pt) >= ST_XMin(v.geom)
+             AND ST_X(u.c_pt) <= ST_XMax(v.geom)
+             AND ST_Y(u.c_pt) >= ST_YMin(v.geom)
+             AND ST_Y(u.c_pt) <= ST_YMax(v.geom)
+             AND ST_Within(u.c_pt, v.geom)
+            JOIN "{name}_05_tmp4" p ON p.fid = v.fid
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY u.cid ORDER BY p.fid) = 1
         )
-        SELECT * EXCLUDE (vgeom), ST_Collect(list(vgeom)) AS geom
+        SELECT * EXCLUDE (vgeom, cid), ST_Collect(list(vgeom)) AS geom
         FROM (
             SELECT * FROM all_joined WHERE fid IS NOT NULL
             UNION ALL
-            SELECT * FROM fallback
+            SELECT NULL AS cid, * FROM fallback
         )
         GROUP BY ALL
     """)
+    if not debug:
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_04"')
 
     if not debug:
         conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp3"')

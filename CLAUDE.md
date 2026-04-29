@@ -44,15 +44,16 @@ Pre-commit hooks run `uv-sync`, `ruff-format`, and `ruff-check` automatically.
 
 ## Architecture
 
-The pipeline has 5 sequential stages, each a standalone module in `app/`. All stages share a single DuckDB connection (file-backed or in-memory); tables are the IPC mechanism between stages. `__main__.py` chains all stages together in a sequential for-loop over input files.
+The pipeline has 6 sequential stages, each a standalone module in `app/`. All stages share a single DuckDB connection (file-backed or in-memory); tables are the IPC mechanism between stages. `__main__.py` chains all stages together in a sequential for-loop over input files.
 
 ### Pipeline Stages
 
 1. **`inputs.main`** — Reads geodata via DuckDB `ST_Read`, reprojects to EPSG:4326, stores as `*_01` (geometry)
-2. **`lines.main`** — Extracts boundary lines per polygon; produces `*_02a` (exterior edges) and `*_02b` (interior/shared edges)
-3. **`attempt.main`** — Wrapper around `points.main` + `voronoi.main` that retries with doubling distance on failure (0.0002 → 0.1024, up to 10 attempts); `points.main` creates `*_03a` (buffered endpoint union) and `*_03b` (interpolated points), `voronoi.main` generates Voronoi polygons (`*_04`)
-4. **`merge.main`** — Merges Voronoi extension with original polygons via `ST_Node` + `ST_Polygonize` (`*_05`)
-5. **`outputs.main`** — Validates topology, joins geometry with original attributes, exports via DuckDB COPY
+2. **`clean.main`** — DIY `ST_CoverageClean` equivalent: removes overlaps and absorbs thin-sliver gaps. Rewrites `*_01` in place. Skipped when `ST_CoverageInvalidEdges_Agg` returns NULL/empty (no coverage errors). Lakes (wide interior holes) are preserved. Single swap boundary for the future official `ST_CoverageClean` binding.
+3. **`lines.main`** — Extracts boundary lines per polygon; produces `*_02a` (exterior edges) and `*_02b` (interior/shared edges)
+4. **`attempt.main`** — Wrapper around `points.main` + `voronoi.main` that retries with doubling distance on failure (0.0002 → 0.1024, up to 10 attempts); `points.main` creates `*_03a` (buffered endpoint union) and `*_03b` (interpolated points), `voronoi.main` generates Voronoi polygons (`*_04`)
+5. **`merge.main`** — Merges Voronoi extension with original polygons via `ST_Node` + `ST_Polygonize` (`*_05`)
+6. **`outputs.main`** — Validates topology, joins geometry with original attributes, exports via DuckDB COPY
 
 ### Configuration
 
@@ -61,6 +62,9 @@ The pipeline has 5 sequential stages, each a standalone module in `app/`. All st
 | Setting                    | Default                    | Description                                                   |
 | -------------------------- | -------------------------- | ------------------------------------------------------------- |
 | `DISTANCE`                 | `0.0002`                   | Point spacing in decimal degrees                              |
+| `GAP_MAX_WIDTH`            | `0.0001`                   | Sub-pixel safety net: holes with max-inscribed-diameter ≤ this are absorbed regardless of shape (catches small round artifacts) |
+| `GAP_MAX_THINNESS`         | `0.05`                     | Polsby-Popper threshold (`4πA/P²`): primary sliver discriminator. Holes with PP ≤ this are absorbed. 0.05 ≈ 1:30 aspect ratio; intentional shapes (squares ≈ 0.79) easily preserved |
+| `OVERLAP_STRATEGY`         | `largest_area`             | Overlap loser selection in clean stage; `largest_area` or `merge_longest_border` |
 | `INPUT_DIR` / `OUTPUT_DIR` | `../inputs` / `../outputs` | I/O directories (relative to `app/`)                          |
 | `TMP_DIR`                  | `../tmp`                   | Intermediate DuckDB + Parquet location                        |
 | `THREADS`                  | (unset)                    | DuckDB thread count; unset defers to DuckDB default           |
@@ -68,7 +72,7 @@ The pipeline has 5 sequential stages, each a standalone module in `app/`. All st
 | `DEBUG`                    | `False`                    | Keep intermediate tables; export all to Parquet               |
 | `PROFILE`                  | `False`                    | Log timing + memory delta per query                           |
 | `IN_MEMORY`                | `False`                    | Use in-memory DuckDB instead of file-backed                   |
-| `STAGE`                    | (none)                     | Run only one named stage (inputs/lines/attempt/merge/outputs) |
+| `STAGE`                    | (none)                     | Run only one named stage (inputs/clean/lines/attempt/merge/outputs) |
 
 ### Table Naming Convention
 
@@ -78,7 +82,7 @@ Tables are named `{name}_{stage}[suffix]` where stage is a two-digit number and 
 - **Letter suffix (`_02a`, `_02b`)** — stage produces multiple persistent tables; **all** of them get a letter, including the first. Never leave one bare while siblings have letters.
 - **`_tmp{n}` suffix** — table is dropped within the same file before the function returns; not visible to downstream stages unless `--debug` is set
 
-The current sequence: `_01` → `_02a/_02b` → `_03a/_03b` → `_04` → `_05`
+The current sequence: `_01` (potentially rewritten by clean) → `_02a/_02b` → `_03a/_03b` → `_04` → `_05`
 
 ### Key Patterns
 

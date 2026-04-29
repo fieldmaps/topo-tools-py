@@ -7,15 +7,29 @@ from .config import debug
 
 def main(conn: DuckDBPyConnection, name: str) -> None:
     """Create Voronoi polygons from points."""
-    # Voronoi diagram from all input points
+    # Voronoi diagram from all input points. The QUALIFY drops `_03b` rows that
+    # are duplicates after rounding (x,y) to 1e-12 — a 0.1-picometer key that
+    # only collapses true GEOS-precision duplicates while preserving every kept
+    # point's original coordinate bit-for-bit. Without it, GEOS throws
+    # "TopologyException: side location conflict" on cod_admin3, where adjacent
+    # polygons sharing a boundary endpoint each interpolate a point at the same
+    # location, producing exact-coordinate duplicate seeds that GEOS Voronoi
+    # cannot disambiguate. 1e-12 is well above the GEOS noise floor — coarser
+    # rounding (1e-14, 1e-15) doesn't dedup tightly enough to fix the conflict.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_04_tmp1" AS
+        WITH unique_pts AS (
+            SELECT geom FROM "{name}_03b"
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY round(ST_X(geom), 12), round(ST_Y(geom), 12)
+            ) = 1
+        )
         SELECT UNNEST(ST_Dump(
             ST_CollectionExtract(
                 ST_VoronoiDiagram(ST_Collect(list(geom))), 3
             )
         )).geom AS geom
-        FROM "{name}_03b"
+        FROM unique_pts
     """)
 
     # Assign source fid to each Voronoi cell via point-in-polygon.
