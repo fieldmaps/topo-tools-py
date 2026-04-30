@@ -1,11 +1,8 @@
-# syntax=docker/dockerfile:1.7
-FROM python:3.14-slim AS geos-builder
+FROM alpine:edge AS geos-builder
 
 ARG GEOS_VERSION=3.14.1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache build-base cmake ca-certificates curl
 
 RUN curl -fsSL "https://download.osgeo.org/geos/geos-${GEOS_VERSION}.tar.bz2" \
         | tar xj -C /tmp \
@@ -18,7 +15,9 @@ RUN curl -fsSL "https://download.osgeo.org/geos/geos-${GEOS_VERSION}.tar.bz2" \
     && cmake --install /tmp/geos-build
 
 
-FROM python:3.14-slim
+# alpine:edge is the unstable channel; py3-duckdb only exists in edge/testing.
+# Versions are intentionally unpinned — accept whatever edge/testing ships.
+FROM alpine:edge
 
 LABEL org.opencontainers.image.source="https://github.com/fieldmaps/edge-extender" \
       org.opencontainers.image.title="edge-extender" \
@@ -27,17 +26,18 @@ LABEL org.opencontainers.image.source="https://github.com/fieldmaps/edge-extende
 WORKDIR /srv
 
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_ROOT_USER_ACTION=ignore
+    PYTHONDONTWRITEBYTECODE=1
+
+# libstdc++ is libgeos's only runtime dep on Alpine.
+RUN apk add --no-cache \
+        --repository=https://dl-cdn.alpinelinux.org/alpine/edge/main \
+        --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
+        python3 py3-duckdb libstdc++
 
 COPY --from=geos-builder /opt/geos/lib/ /usr/local/lib/
-RUN ldconfig
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install duckdb==1.5.2 && \
-    python -c "import duckdb; duckdb.connect().execute('INSTALL spatial')"
+RUN python3 -c "import duckdb; duckdb.connect().execute('INSTALL spatial')"
 
 COPY app ./app
 
-ENTRYPOINT ["python", "-m", "app"]
+ENTRYPOINT ["python3", "-m", "app"]

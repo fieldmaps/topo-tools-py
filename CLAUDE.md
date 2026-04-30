@@ -1,6 +1,18 @@
 # CLAUDE.md
 
-This file provides guidance to agents when working with code in this repository.
+## Verification Over Recall
+
+- Never rely on remembered knowledge for libraries, APIs, or frameworks —
+  check installed versions and docs before writing code or making claims
+- If you lack verified information, acknowledge uncertainty and investigate
+  first rather than speculate
+
+## Collaboration Style
+
+- Be objective, not agreeable — act as a partner, not a sycophant
+- Push back when you disagree, flag tradeoffs honestly, don't sugarcoat problems
+- Keep explanations brief and to the point
+- Accuracy over speed
 
 ## Project Overview
 
@@ -44,31 +56,33 @@ Pre-commit hooks run `uv-sync`, `ruff-format`, and `ruff-check` automatically.
 
 ## Architecture
 
-The pipeline has 5 sequential stages, each a standalone module in `app/`. All stages share a single DuckDB connection (file-backed or in-memory); tables are the IPC mechanism between stages. `__main__.py` chains all stages together in a sequential for-loop over input files.
+The pipeline has 6 sequential stages, each a standalone module in `app/`. All stages share a single DuckDB connection (file-backed or in-memory); tables are the IPC mechanism between stages. `__main__.py` chains all stages together in a sequential for-loop over input files.
 
 ### Pipeline Stages
 
 1. **`inputs.main`** — Reads geodata via DuckDB `ST_Read`, reprojects to EPSG:4326, stores as `*_01` (geometry)
-2. **`lines.main`** — Extracts boundary lines per polygon; produces `*_02a` (exterior edges) and `*_02b` (interior/shared edges)
-3. **`attempt.main`** — Wrapper around `points.main` + `voronoi.main` that retries with doubling distance on failure (0.0002 → 0.1024, up to 10 attempts); `points.main` creates `*_03a` (buffered endpoint union) and `*_03b` (interpolated points), `voronoi.main` generates Voronoi polygons (`*_04`)
-4. **`merge.main`** — Merges Voronoi extension with original polygons via `ST_Node` + `ST_Polygonize` (`*_05`)
-5. **`outputs.main`** — Validates topology, joins geometry with original attributes, exports via DuckDB COPY
+2. **`clean.main`** — Pre-checks `_01` with `ST_CoverageInvalidEdges_Agg`; if violations are found, passes feature WKBs through `GEOSCoverageClean_r` (libgeos 3.14 ctypes binding in `app/clean.py`) and rewrites `*_01` with cleaned geometries. No-op when the input coverage is already valid. Requires libgeos ≥ 3.14 — Dockerfile builds it from source; macOS dev: `brew install geos` (3.14+); set `LIBGEOS_PATH` to override discovery.
+3. **`lines.main`** — Extracts boundary lines per polygon; produces `*_02a` (exterior edges) and `*_02b` (interior/shared edges)
+4. **`attempt.main`** — Wrapper around `points.main` + `voronoi.main` that retries with doubling distance on failure (0.0002 → 0.1024, up to 10 attempts); `points.main` creates `*_03a` (buffered endpoint union) and `*_03b` (interpolated points), `voronoi.main` generates Voronoi polygons (`*_04`)
+5. **`merge.main`** — Merges Voronoi extension with original polygons via `ST_Node` + `ST_Polygonize` (`*_05`)
+6. **`outputs.main`** — Validates topology, joins geometry with original attributes, exports via DuckDB COPY
 
 ### Configuration
 
 `app/config.py` parses CLI arguments and environment variables at **module level**. All other modules import from config directly. Key settings:
 
-| Setting                    | Default                    | Description                                                   |
-| -------------------------- | -------------------------- | ------------------------------------------------------------- |
-| `DISTANCE`                 | `0.0002`                   | Point spacing in decimal degrees                              |
-| `INPUT_DIR` / `OUTPUT_DIR` | `../inputs` / `../outputs` | I/O directories (relative to `app/`)                          |
-| `TMP_DIR`                  | `../tmp`                   | Intermediate DuckDB + Parquet location                        |
-| `THREADS`                  | (unset)                    | DuckDB thread count; unset defers to DuckDB default           |
-| `OVERWRITE`                | `False`                    | Overwrite existing output                                     |
-| `DEBUG`                    | `False`                    | Keep intermediate tables; export all to Parquet               |
-| `PROFILE`                  | `False`                    | Log timing + memory delta per query                           |
-| `IN_MEMORY`                | `False`                    | Use in-memory DuckDB instead of file-backed                   |
-| `STAGE`                    | (none)                     | Run only one named stage (inputs/lines/attempt/merge/outputs) |
+| Setting                    | Default                    | Description                                                         |
+| -------------------------- | -------------------------- | ------------------------------------------------------------------- |
+| `DISTANCE`                 | `0.0002`                   | Point spacing in decimal degrees                                    |
+| `INPUT_DIR` / `OUTPUT_DIR` | `../inputs` / `../outputs` | I/O directories (relative to `app/`)                                |
+| `TMP_DIR`                  | `../tmp`                   | Intermediate DuckDB + Parquet location                              |
+| `THREADS`                  | (unset)                    | DuckDB thread count; unset defers to DuckDB default                 |
+| `OVERWRITE`                | `False`                    | Overwrite existing output                                           |
+| `DEBUG`                    | `False`                    | Keep intermediate tables; export all to Parquet                     |
+| `PROFILE`                  | `False`                    | Log timing + memory delta per query                                 |
+| `IN_MEMORY`                | `False`                    | Use in-memory DuckDB instead of file-backed                         |
+| `STAGE`                    | (none)                     | Run only one named stage (inputs/clean/lines/attempt/merge/outputs) |
+| `LIBGEOS_PATH`             | (auto-discovered)          | Path to `libgeos_c` shared library used by `clean.main`             |
 
 ### Table Naming Convention
 
@@ -78,7 +92,7 @@ Tables are named `{name}_{stage}[suffix]` where stage is a two-digit number and 
 - **Letter suffix (`_02a`, `_02b`)** — stage produces multiple persistent tables; **all** of them get a letter, including the first. Never leave one bare while siblings have letters.
 - **`_tmp{n}` suffix** — table is dropped within the same file before the function returns; not visible to downstream stages unless `--debug` is set
 
-The current sequence: `_01` → `_02a/_02b` → `_03a/_03b` → `_04` → `_05`
+The current sequence: `_01` → `_02a/_02b` → `_03a/_03b` → `_04` → `_05`. The `clean` stage rewrites `_01` in place when violations are detected; it does not introduce a new suffix.
 
 ### Key Patterns
 

@@ -6,16 +6,13 @@ from pathlib import Path
 from duckdb import DuckDBPyConnection
 
 from .config import COPY_OPTS, debug, output_dir, output_file
+from .utils import has_coverage_violations
 
 logger = getLogger(__name__)
 
 
 def _check_overlaps(conn: DuckDBPyConnection, table: str) -> None:
-    has_overlaps = conn.execute(f"""--sql
-        SELECT ST_CoverageInvalidEdges_Agg(geom) IS NOT NULL
-        FROM (SELECT UNNEST(ST_Dump(geom)).geom AS geom FROM "{table}")
-    """).fetchall()[0][0]
-    if has_overlaps:
+    if has_coverage_violations(conn, table):
         error = f"OVERLAPS: {table}"
         logger.error(error)
         raise RuntimeError(error)

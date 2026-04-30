@@ -137,6 +137,14 @@ def get_connection(name: str) -> ProfiledConnection:
     return ProfiledConnection(conn)
 
 
+def has_coverage_violations(conn: DuckDBPyConnection, table: str) -> bool:
+    """Return True if `table.geom` has any overlaps or unmatched shared edges."""
+    return conn.execute(f"""--sql
+        SELECT ST_CoverageInvalidEdges_Agg(geom) IS NOT NULL
+        FROM (SELECT UNNEST(ST_Dump(geom)).geom AS geom FROM "{table}")
+    """).fetchall()[0][0]
+
+
 def cleanup_tmp(name: str, *, parquet: bool = False) -> None:
     """Remove tmp files for a named pipeline run."""
     if not in_memory:
