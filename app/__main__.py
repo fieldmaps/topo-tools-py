@@ -6,7 +6,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Never
 
-from . import attempt, inputs, lines, merge, outputs
+from . import attempt, clean, inputs, lines, merge, outputs
 from .config import (
     FORMATS,
     debug,
@@ -26,6 +26,7 @@ logger = getLogger(__name__)
 
 _STAGES = {
     "inputs": inputs.main,
+    "clean": lambda conn, name, _path: clean.main(conn, name),
     "lines": lambda conn, name, _path: lines.main(conn, name),
     "attempt": lambda conn, name, _path: attempt.main(conn, name),
     "merge": lambda conn, name, _path: merge.main(conn, name),
@@ -34,6 +35,15 @@ _STAGES = {
 
 _STAGE_TABLES = {
     "inputs": ["{n}_01"],
+    "clean": [
+        "{n}_01",
+        "{n}_01_clean_tmp2",
+        "{n}_01_clean_tmp3",
+        "{n}_01_clean_tmp4",
+        "{n}_01_clean_tmp5",
+        "{n}_01_clean_tmp6",
+        "{n}_01_clean_tmp7",
+    ],
     "lines": ["{n}_02a", "{n}_02b"],
     "attempt": ["{n}_03a", "{n}_03b", "{n}_04", "{n}_04_tmp1", "{n}_04_tmp2"],
     "merge": ["{n}_05", "{n}_05_tmp1", "{n}_05_tmp2", "{n}_05_tmp3", "{n}_05_tmp4"],

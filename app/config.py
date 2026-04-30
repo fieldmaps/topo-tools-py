@@ -40,7 +40,7 @@ parser.add_argument("--in-memory", **_bool_flag("IN_MEMORY"))
 parser.add_argument(
     "--stage",
     default=getenv("STAGE"),
-    choices=["inputs", "lines", "attempt", "merge", "outputs"],
+    choices=["inputs", "clean", "lines", "attempt", "merge", "outputs"],
 )
 args = parser.parse_args()
 
