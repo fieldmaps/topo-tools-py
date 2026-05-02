@@ -119,7 +119,6 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     if not debug:
         conn.execute(f'DROP TABLE IF EXISTS "{name}_02a"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_03a"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_04"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp1"')
 
     # Split noding+polygonizing from the spatial join so DuckDB can release the
@@ -156,7 +155,12 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     """)
 
     # LEFT JOIN so orphan extension cells are caught by the fallback rather than
-    # silently dropped as gaps.
+    # silently dropped as gaps. Orphans are sub-cells too small to contain any
+    # _01 interior point (e.g. tiny slivers in stairstep boundary regions).
+    # Route each orphan to the fid whose Voronoi cell (`_04`) contains the
+    # orphan's interior point — that's the territory map the pipeline already
+    # trusts. Distance-to-nearest-_01.pt would mis-route slivers in stairstep
+    # zones, ignoring topology.
     #
     # The bbox prefilter on the LEFT JOIN ON clause is required: ST_Within alone
     # plans as SPATIAL_JOIN (~1x RAM virtual reservation). With explicit
@@ -182,19 +186,22 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
             QUALIFY ROW_NUMBER() OVER (PARTITION BY c.cid ORDER BY p.fid NULLS LAST) = 1
         ),
         unmatched AS (
-            SELECT ROW_NUMBER() OVER () AS uid, vgeom
+            SELECT ROW_NUMBER() OVER () AS uid, vgeom,
+                   ST_PointOnSurface(vgeom) AS upt
             FROM all_joined WHERE fid IS NULL
         ),
         fallback AS (
-            SELECT u.vgeom, p.* EXCLUDE (pt)
+            SELECT u.vgeom, o.* EXCLUDE (geom)
             FROM unmatched u
-            CROSS JOIN "{name}_05_tmp4" p
-            QUALIFY ROW_NUMBER() OVER (
-                PARTITION BY u.uid
-                ORDER BY ST_Distance(ST_Centroid(u.vgeom), p.pt)
-            ) = 1
+            JOIN "{name}_04" v
+              ON ST_X(u.upt) >= ST_XMin(v.geom)
+             AND ST_X(u.upt) <= ST_XMax(v.geom)
+             AND ST_Y(u.upt) >= ST_YMin(v.geom)
+             AND ST_Y(u.upt) <= ST_YMax(v.geom)
+             AND ST_Within(u.upt, v.geom)
+            JOIN "{name}_01" o ON o.fid = v.fid
         )
-        SELECT * EXCLUDE (vgeom), ST_Collect(list(vgeom)) AS geom
+        SELECT * EXCLUDE (vgeom), ST_Union_Agg(vgeom) AS geom
         FROM (
             SELECT * FROM all_joined WHERE fid IS NOT NULL
             UNION ALL
@@ -204,5 +211,6 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     """)
 
     if not debug:
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_04"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp3"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp4"')

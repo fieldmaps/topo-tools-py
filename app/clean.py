@@ -303,62 +303,94 @@ def _clean_wkbs(wkbs: list[bytes], gap_max_width: float | None = None) -> list[b
         )
 
 
-def _sliver_gap_max_width(conn: DuckDBPyConnection, name: str) -> float | None:
-    """Return gapMaximumWidth that catches every thin gap, or None if no slivers.
+def _sliver_info(conn: DuckDBPyConnection, name: str) -> tuple[float | None, list[int]]:
+    """Detect sliver gaps; return (max_width, bordering_fids).
 
     Slivers are interior rings of ST_Union_Agg(_01) with Polsby-Popper
     compactness (4π·area / perimeter²) below 0.5 — below the lowest plausible
     compactness for a real polygonal feature (equilateral triangle ≈ 0.6).
-    The threshold returned is the maximum sliver width (2x inscribed-circle
+    The width returned is the maximum sliver width (2x inscribed-circle
     radius), so all slivers fall under it and any rounder gap is preserved.
+
+    The union is unnested into single-polygon parts before counting interior
+    rings; ST_NumInteriorRings on a MultiPolygon returns 0, so a coverage
+    that splits into multiple parts (e.g. mainland + offshore islet) would
+    otherwise hide every interior-ring gap.
+
+    Returns (None, []) when no slivers exist.
     """
     row = conn.execute(f"""--sql
         WITH
         u AS (SELECT ST_Union_Agg(geom) AS g FROM "{name}_01"),
+        parts AS (SELECT UNNEST(ST_Dump(g)).geom AS p FROM u),
         rings AS (
-            SELECT UNNEST(generate_series(1, ST_NumInteriorRings(g))) AS i, g
-            FROM u
+            SELECT UNNEST(generate_series(1, ST_NumInteriorRings(p))) AS i, p
+            FROM parts
         ),
         gaps AS (
-            SELECT ST_MakePolygon(ST_InteriorRingN(g, i)) AS gap FROM rings
+            SELECT ST_MakePolygon(ST_InteriorRingN(p, i)) AS gap FROM rings
         ),
         slivers AS (
             SELECT
+                gap,
                 ST_MaximumInscribedCircle(gap, 1e-9).radius * 2 AS width
             FROM gaps
             WHERE 4 * pi() * ST_Area(gap)
                 / (ST_Perimeter(gap) * ST_Perimeter(gap)) < {_SLIVER_COMPACTNESS_MAX}
         )
-        SELECT count(*), max(width) FROM slivers
-    """).fetchall()[0]
-    n_slivers, max_width = row
-    if not n_slivers or max_width is None:
-        return None
+        SELECT max(s.width), list(DISTINCT i.fid)
+        FROM slivers s, "{name}_01" i
+        WHERE ST_Intersects(i.geom, s.gap)
+    """).fetchone()
+    max_width, fids = row
+    if max_width is None:
+        return None, []
+    fids = sorted(fids or [])
     logger.info(
-        "auto-detected %d sliver gap(s); gap_max_width=%.3e", n_slivers, max_width
+        "auto-detected sliver gap(s) bordering %d feature(s); gap_max_width=%.3e",
+        len(fids),
+        max_width,
     )
-    return float(max_width)
+    return float(max_width), fids
 
 
-def main(conn: DuckDBPyConnection, name: str) -> None:
-    """Clean coverage topology violations in _01 if any are present."""
-    if not has_coverage_violations(conn, f"{name}_01"):
-        logger.info("coverage already valid; skipping clean")
-        return
+def _violator_fids(conn: DuckDBPyConnection, name: str) -> list[int]:
+    """Return fids of polygons that touch any invalid coverage edge.
 
-    gap_max_width = _sliver_gap_max_width(conn, name)
-
-    rows = conn.execute(f"""--sql
-        SELECT fid, ST_AsWKB(geom)::BLOB FROM "{name}_01" ORDER BY fid
+    `ST_CoverageInvalidEdges_Agg` returns a multilinestring whose non-empty
+    parts are the edges where the coverage breaks. A polygon "owns" a
+    violation if its boundary intersects any non-empty invalid edge.
+    """
+    return [
+        r[0]
+        for r in conn.execute(f"""--sql
+        WITH
+        bad AS (
+            SELECT ST_CoverageInvalidEdges_Agg(geom) AS edges
+            FROM (SELECT UNNEST(ST_Dump(geom)).geom AS geom FROM "{name}_01")
+        ),
+        edges AS (
+            SELECT UNNEST(ST_Dump(edges)).geom AS edge FROM bad
+        ),
+        real_edges AS (
+            SELECT edge FROM edges
+            WHERE NOT ST_IsEmpty(edge) AND ST_NPoints(edge) > 0
+        )
+        SELECT DISTINCT i.fid
+        FROM "{name}_01" i, real_edges e
+        WHERE ST_Intersects(i.geom, e.edge)
+        ORDER BY i.fid
     """).fetchall()
-    fids = [r[0] for r in rows]
-    wkbs = [bytes(r[1]) for r in rows]
-    rows = []
+    ]
 
-    logger.info("cleaning coverage with %d features via GEOSCoverageClean", len(wkbs))
-    cleaned_wkbs = _clean_wkbs(wkbs, gap_max_width=gap_max_width)
-    wkbs = []
 
+def _apply_cleaned(
+    conn: DuckDBPyConnection,
+    name: str,
+    fids: list[int],
+    cleaned_wkbs: list[bytes],
+) -> None:
+    """Replace the geom of the listed fids in _01 with the cleaned WKBs."""
     conn.execute(
         f'CREATE OR REPLACE TEMP TABLE "{name}_clean_tmp" (fid BIGINT, wkb BLOB)'
     )
@@ -368,8 +400,98 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     )
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_01" AS
-        SELECT t.* EXCLUDE (geom), ST_GeomFromWKB(c.wkb) AS geom
+        SELECT t.* EXCLUDE (geom),
+               COALESCE(ST_GeomFromWKB(c.wkb), t.geom) AS geom
         FROM "{name}_01" t
-        JOIN "{name}_clean_tmp" c USING (fid)
+        LEFT JOIN "{name}_clean_tmp" c USING (fid)
     """)
     conn.execute(f'DROP TABLE "{name}_clean_tmp"')
+
+
+def _global_clean(conn: DuckDBPyConnection, name: str) -> None:
+    """Run GEOSCoverageClean on the entire _01 in one pass and write back.
+
+    Used as a fallback when surgical cleaning fails to converge. This is the
+    original (pre-surgical) behaviour: every polygon in _01 is sent through
+    coverage clean, so every polygon's coordinates may shift.
+    """
+    gap_max_width, _ = _sliver_info(conn, name)
+    rows = conn.execute(f"""--sql
+        SELECT fid, ST_AsWKB(geom)::BLOB FROM "{name}_01" ORDER BY fid
+    """).fetchall()
+    fids = [r[0] for r in rows]
+    wkbs = [bytes(r[1]) for r in rows]
+    logger.info("global clean: %d feature(s) via GEOSCoverageClean", len(wkbs))
+    cleaned_wkbs = _clean_wkbs(wkbs, gap_max_width=gap_max_width)
+    _apply_cleaned(conn, name, fids, cleaned_wkbs)
+
+
+def main(conn: DuckDBPyConnection, name: str) -> None:
+    """Clean coverage topology violations and sliver gaps in _01 surgically.
+
+    Identifies the subset of polygons that own invalid edges or border a
+    sliver gap, runs GEOSCoverageClean on that subset only, and splices the
+    result back into _01. Polygons not in the subset stay byte-identical
+    to input.
+
+    Sliver gaps (interior rings in the unioned coverage with very low
+    Polsby-Popper compactness) are not invalid edges, so
+    ST_CoverageInvalidEdges_Agg won't flag them. They still break the
+    pipeline downstream (lines.main can't extract a shared edge that
+    doesn't exist as coincident geometry, and merge.main fuses the
+    sliver-bounding polygons into one cell), so they need cleaning too.
+
+    If the surgical pass leaves residual violations (e.g. cleaning created
+    new ones at the boundary with unchanged neighbours), restore _01 from
+    a snapshot and fall back to a single full-coverage clean — better to
+    take the global drift hit once than ship a half-cleaned coverage.
+    """
+    invalid_fids = (
+        _violator_fids(conn, name)
+        if has_coverage_violations(conn, f"{name}_01")
+        else []
+    )
+    gap_max_width, sliver_fids = _sliver_info(conn, name)
+    violators = sorted(set(invalid_fids) | set(sliver_fids))
+    if not violators:
+        logger.info("coverage already valid; skipping clean")
+        return
+
+    conn.execute(
+        f'CREATE OR REPLACE TABLE "{name}_01_snapshot" AS SELECT * FROM "{name}_01"'
+    )
+
+    fid_list = ",".join(str(f) for f in violators)
+    rows = conn.execute(f"""--sql
+        SELECT fid, ST_AsWKB(geom)::BLOB
+        FROM "{name}_01"
+        WHERE fid IN ({fid_list})
+        ORDER BY fid
+    """).fetchall()
+    fids = [r[0] for r in rows]
+    wkbs = [bytes(r[1]) for r in rows]
+    logger.info(
+        "surgical clean: %d violator(s) (%d invalid-edge, %d sliver) via "
+        "GEOSCoverageClean",
+        len(violators),
+        len(invalid_fids),
+        len(sliver_fids),
+    )
+    cleaned_wkbs = _clean_wkbs(wkbs, gap_max_width=gap_max_width)
+    _apply_cleaned(conn, name, fids, cleaned_wkbs)
+
+    residual_invalid = has_coverage_violations(conn, f"{name}_01")
+    _, residual_slivers = _sliver_info(conn, name)
+    if residual_invalid or residual_slivers:
+        logger.warning(
+            "surgical clean did not converge (invalid_edges=%s, slivers=%d); "
+            "restoring _01 and falling back to full-coverage clean",
+            residual_invalid,
+            len(residual_slivers),
+        )
+        conn.execute(
+            f'CREATE OR REPLACE TABLE "{name}_01" AS SELECT * FROM "{name}_01_snapshot"'
+        )
+        _global_clean(conn, name)
+
+    conn.execute(f'DROP TABLE IF EXISTS "{name}_01_snapshot"')
