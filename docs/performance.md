@@ -18,7 +18,7 @@ in both directions:
   `.duckdb` file as still "allocated". For Chile `_05`, this inflated the duckdb peak by
   ~2.5 GB (8.1 GB duckdb vs 5.5 GB RSS).
 
-The `--profile` flag logs `rss peak` (from `psutil.Process().memory_info().rss`, sampled
+The `--debug` flag logs `rss peak` (from `psutil.Process().memory_info().rss`, sampled
 every 50 ms) alongside `duckdb delta/total` for table-accumulation context.
 
 

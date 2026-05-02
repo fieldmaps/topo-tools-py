@@ -35,8 +35,6 @@ parser.add_argument("--distance", default=getenv("DISTANCE", "0.0002"))
 parser.add_argument("--threads", default=getenv("THREADS"))
 parser.add_argument("--overwrite", **_bool_flag("OVERWRITE"))
 parser.add_argument("--debug", **_bool_flag("DEBUG"))
-parser.add_argument("--profile", **_bool_flag("PROFILE"))
-parser.add_argument("--in-memory", **_bool_flag("IN_MEMORY"))
 parser.add_argument(
     "--stage",
     default=getenv("STAGE"),
@@ -58,8 +56,6 @@ output_file = Path(args.output_file) if args.output_file else None
 tmp_dir = Path(args.tmp_dir)
 overwrite = args.overwrite
 debug = args.debug or bool(args.stage)
-profile = args.profile
-in_memory = args.in_memory
 stage = args.stage
 
 FORMATS = [".shp", ".geojson", ".parquet", ".gpkg"]

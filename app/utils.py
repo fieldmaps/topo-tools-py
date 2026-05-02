@@ -10,7 +10,7 @@ import psutil
 from duckdb import DuckDBPyConnection
 from duckdb import connect as duckdb_connect
 
-from .config import in_memory, num_threads, profile, tmp_dir
+from .config import debug, num_threads, tmp_dir
 
 _PROCESS = psutil.Process()
 logger = getLogger(__name__)
@@ -70,7 +70,7 @@ class ProfiledConnection:
 
     def execute(self, query: str, parameters: list | None = None):  # noqa: ANN201
         """Log wall-clock time, RSS peak, and duckdb delta/total, then forward."""
-        if not profile:
+        if not debug:
             return (
                 self._conn.execute(query, parameters)
                 if parameters is not None
@@ -125,9 +125,8 @@ class ProfiledConnection:
 
 
 def get_connection(name: str) -> ProfiledConnection:
-    """Create a DuckDB connection (file-backed or in-memory) with spatial loaded."""
-    db_path = None if in_memory else str(tmp_dir / f"{name}.duckdb")
-    conn = duckdb_connect() if db_path is None else duckdb_connect(db_path)
+    """Create a file-backed DuckDB connection with spatial loaded."""
+    conn = duckdb_connect(str(tmp_dir / f"{name}.duckdb"))
     conn.execute("LOAD spatial")
     conn.execute("SET enable_progress_bar = false")
     conn.execute("SET geometry_always_xy = true")
@@ -147,9 +146,8 @@ def has_coverage_violations(conn: DuckDBPyConnection, table: str) -> bool:
 
 def cleanup_tmp(name: str, *, parquet: bool = False) -> None:
     """Remove tmp files for a named pipeline run."""
-    if not in_memory:
-        for p in tmp_dir.glob(f"{name}.duckdb*"):
-            p.unlink(missing_ok=True)
+    for p in tmp_dir.glob(f"{name}.duckdb*"):
+        p.unlink(missing_ok=True)
     if parquet:
         for p in tmp_dir.glob(f"{name}*.parquet"):
             p.unlink(missing_ok=True)

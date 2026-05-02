@@ -11,12 +11,10 @@ from .config import (
     FORMATS,
     debug,
     distance,
-    in_memory,
     input_dir,
     input_file,
     output_dir,
     overwrite,
-    profile,
     stage,
     tmp_dir,
 )
@@ -58,7 +56,7 @@ def _run_file(path: Path) -> None:
     try:
         for s, fn in _STAGES.items():
             if not stage or stage == s:
-                if profile:
+                if debug:
                     logger.info("=== %s ===", s)
                 fn(conn, name, path)
         if debug:
@@ -76,9 +74,7 @@ def _run_file(path: Path) -> None:
 
 def main() -> None:
     """Run main function."""
-    logger.info(
-        "--distance=%s --profile=%s --in-memory=%s", distance, profile, in_memory
-    )
+    logger.info("--distance=%s --debug=%s", distance, debug)
     files = [input_file] if input_file else sorted(input_dir.iterdir())
     for path in files:
         if not overwrite and (output_dir / path.name).exists():
