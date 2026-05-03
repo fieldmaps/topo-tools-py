@@ -36,8 +36,8 @@ parser.add_argument("--threads", default=getenv("THREADS"))
 parser.add_argument("--overwrite", **_bool_flag("OVERWRITE"))
 parser.add_argument("--debug", **_bool_flag("DEBUG"))
 parser.add_argument(
-    "--stage",
-    default=getenv("STAGE"),
+    "--step",
+    default=getenv("STEP"),
     choices=["inputs", "clean", "lines", "attempt", "merge", "outputs"],
 )
 args = parser.parse_args()
@@ -55,8 +55,8 @@ output_dir = Path(args.output_dir)
 output_file = Path(args.output_file) if args.output_file else None
 tmp_dir = Path(args.tmp_dir)
 overwrite = args.overwrite
-debug = args.debug or bool(args.stage)
-stage = args.stage
+debug = args.debug or bool(args.step)
+step = args.step
 
 FORMATS = [".shp", ".geojson", ".parquet", ".gpkg"]
 

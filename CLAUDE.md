@@ -79,7 +79,7 @@ The pipeline has 6 sequential stages, each a standalone module in `app/`. All st
 | `THREADS`                  | (unset)                    | DuckDB thread count; unset defers to DuckDB default                 |
 | `OVERWRITE`                | `False`                    | Overwrite existing output                                           |
 | `DEBUG`                    | `False`                    | Keep intermediate tables, export all to Parquet, and log timing + memory delta per query |
-| `STAGE`                    | (none)                     | Run only one named stage (inputs/clean/lines/attempt/merge/outputs) |
+| `STEP`                     | (none)                     | Run only one named stage (inputs/clean/lines/attempt/merge/outputs) |
 | `LIBGEOS_PATH`             | (auto-discovered)          | Path to `libgeos_c` shared library used by `clean.main`             |
 
 ### Table Naming Convention
@@ -99,7 +99,7 @@ The current sequence: `_01` → `_02a/_02b` → `_03a/_03b` → `_04` → `_05`.
 - **Topology validation** in `checks.py`: `check_overlaps`, `check_gaps`, and `check_missing_rows` always run in outputs. All three unnest MultiPolygon geometries before checking to ensure correct coverage validation across individual polygon pieces.
 - **Geometry column names**: `geom` in DuckDB tables, `geometry` in final output.
 - **Avoid `ST_ClosestPoint(ST_Collect(list(geom)), point)` on large tables.** Collecting thousands of lines into one geometry before calling `ST_ClosestPoint` causes GEOS to allocate large internal acceleration structures — ~6.8 GB for Chile's 700K-point `_02b`. Instead, use a per-segment bbox pre-filter: CROSS JOIN with the source table and filter by `ST_XMin/XMax/YMin/YMax` before calling `ST_ClosestPoint` on only the matching segments. See `_05_tmp2` in `merge.py`.
-- **`duckdb_memory()` measurements in isolation underestimate pipeline peaks.** A fresh connection with few tables in the DuckDB file can show 4 GB for a query that peaks at 8 GB in a full pipeline run, because the buffer pool from other large tables (`_01`, `_04`, `_02b`, etc.) adds several GB of additional pressure. Profile with `--stage=X --debug` on a database file that already has all prior-stage tables present.
+- **`duckdb_memory()` measurements in isolation underestimate pipeline peaks.** A fresh connection with few tables in the DuckDB file can show 4 GB for a query that peaks at 8 GB in a full pipeline run, because the buffer pool from other large tables (`_01`, `_04`, `_02b`, etc.) adds several GB of additional pressure. Profile with `--step=X --debug` on a database file that already has all prior-stage tables present.
 - **Polygon interior point: `ST_MaximumInscribedCircle(geom).center`, not `ST_Centroid`.** Centroids fall outside concave shapes (C-shapes, fjords). Polygons only — keep `ST_PointOnSurface` for lines. Slower (iterative); fine per-row, profile inside joins.
 
 ### Supported Formats

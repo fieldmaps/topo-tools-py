@@ -150,7 +150,7 @@ effect from no longer carrying the SPATIAL_JOIN reservation across stage boundar
 
 Full-pipeline RSS peaks for the merge stage queries at 1 thread. Note: these include the
 buffer pool from all prior-stage tables (`_01`, `_02b`, `_04`, etc.) that are resident in
-memory, so they are higher than isolated `--stage=merge` measurements.
+memory, so they are higher than isolated `--step=merge` measurements.
 
 | Query      | RSS peak | Notes                                                              |
 | ---------- | -------- | ------------------------------------------------------------------ |

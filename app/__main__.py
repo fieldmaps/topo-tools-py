@@ -15,14 +15,14 @@ from .config import (
     input_file,
     output_dir,
     overwrite,
-    stage,
+    step,
     tmp_dir,
 )
 from .utils import cleanup_tmp, export_debug_tables, get_connection
 
 logger = getLogger(__name__)
 
-_STAGES = {
+_STEPS = {
     "inputs": inputs.main,
     "clean": lambda conn, name, _path: clean.main(conn, name),
     "lines": lambda conn, name, _path: lines.main(conn, name),
@@ -31,7 +31,7 @@ _STAGES = {
     "outputs": outputs.main,
 }
 
-_STAGE_TABLES = {
+_STEP_TABLES = {
     "inputs": ["{n}_01"],
     "clean": ["{n}_01"],
     "lines": ["{n}_02a", "{n}_02b"],
@@ -44,7 +44,7 @@ _STAGE_TABLES = {
 def _run_file(path: Path) -> None:
     name = path.name.replace(".", "_")
     tmp_dir.mkdir(exist_ok=True, parents=True)
-    if not stage:
+    if not step:
         cleanup_tmp(name, parquet=True)
     conn = get_connection(name)
 
@@ -54,21 +54,21 @@ def _run_file(path: Path) -> None:
 
     old_handler = signal.signal(signal.SIGINT, _interrupt)
     try:
-        for s, fn in _STAGES.items():
-            if not stage or stage == s:
+        for s, fn in _STEPS.items():
+            if not step or step == s:
                 if debug:
                     logger.info("=== %s ===", s)
                 fn(conn, name, path)
         if debug:
             only = None
-            if stage and stage in _STAGE_TABLES:
-                only = {t.format(n=name) for t in _STAGE_TABLES[stage]}
+            if step and step in _STEP_TABLES:
+                only = {t.format(n=name) for t in _STEP_TABLES[step]}
             export_debug_tables(conn, only=only)
         logger.info("done: %s", name)
     finally:
         signal.signal(signal.SIGINT, old_handler)
         conn.close()
-        if not stage and not debug:
+        if not step and not debug:
             cleanup_tmp(name)
 
 
