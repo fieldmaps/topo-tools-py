@@ -33,14 +33,31 @@ def _check_gaps(conn: DuckDBPyConnection, table: str) -> None:
         raise RuntimeError(error)
 
 
-def _check_missing_rows(conn: DuckDBPyConnection, table_1: str, table_2: str) -> None:
-    rows_1 = conn.execute(f'SELECT count(*) FROM "{table_1}"').fetchall()[0][0] or 0
-    rows_2 = conn.execute(f'SELECT count(*) FROM "{table_2}"').fetchall()[0][0] or 0
-    if rows_1 != rows_2:
-        error = (
-            f"MISSING ROWS: {table_1} has {rows_1} rows, "
-            f"but {table_2} has {rows_2} rows"
+def _check_missing_area(
+    conn: DuckDBPyConnection, table_in: str, table_out: str
+) -> None:
+    """Fail if any output feature shrank below its input area.
+
+    Extension only adds area, so any shrinkage means polygonize fused part
+    of the feature with a neighbour. LEFT JOIN treats missing fids as area
+    0 so they're flagged too. 0.1% tolerance for GEOS noise.
+    """
+    bad = conn.execute(f"""--sql
+        WITH ins AS (SELECT fid, ST_Area(geom) AS area FROM "{table_in}"),
+             outs AS (SELECT fid, ST_Area(geom) AS area FROM "{table_out}")
+        SELECT i.fid, i.area, COALESCE(o.area, 0) AS out_area,
+               (i.area - COALESCE(o.area, 0)) / NULLIF(i.area, 0) AS lost_pct
+        FROM ins i LEFT JOIN outs o USING (fid)
+        WHERE COALESCE(o.area, 0) < i.area * 0.999
+        ORDER BY lost_pct DESC
+        LIMIT 5
+    """).fetchall()
+    if bad:
+        details = ", ".join(
+            f"fid={fid} ({100 * pct:.1f}% lost: {in_a:.4f}->{out_a:.4f})"
+            for fid, in_a, out_a, pct in bad
         )
+        error = f"MISSING AREA: {len(bad)} feature(s); worst: {details}"
         logger.error(error)
         raise RuntimeError(error)
 
@@ -50,7 +67,7 @@ def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
     for run_check in [
         lambda: _check_overlaps(conn, f"{name}_05"),
         lambda: _check_gaps(conn, f"{name}_05"),
-        lambda: _check_missing_rows(conn, f"{name}_05", f"{name}_01"),
+        lambda: _check_missing_area(conn, f"{name}_01", f"{name}_05"),
     ]:
         try:
             run_check()
@@ -68,5 +85,5 @@ def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
     """)
 
     if not debug:
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_05"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_01"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_05"')

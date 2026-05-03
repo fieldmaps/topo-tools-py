@@ -43,6 +43,13 @@ logger = getLogger(__name__)
 _GEOS_GEOMETRYCOLLECTION = 7
 _MIN_GEOS_VERSION = (3, 14, 0)
 _SLIVER_COMPACTNESS_MAX = 0.5
+# Maximum sliver width as a fraction of the input coverage's bbox diagonal.
+# Digitization noise scales with the spatial extent of the dataset (a Congo-
+# scale layer can have 30m slivers; a city-scale layer has cm-scale ones), so
+# the threshold has to scale too. A flat absolute would either miss real
+# slivers in continental data or fill real holes in small-extent data. 1e-5
+# is calibrated against ~30m slivers in Congo (bbox diagonal ~3000km).
+_SLIVER_MAX_WIDTH_FRACTION = 1e-5
 
 
 def _candidate_paths() -> list[str]:
@@ -134,8 +141,17 @@ def _bind(lib: ctypes.CDLL) -> None:
         ctypes.c_double,
     ]
     lib.GEOSCoverageCleanParams_setGapMaximumWidth_r.restype = c_int
+    lib.GEOSCoverageCleanParams_setSnappingDistance_r.argtypes = [
+        c_void_p,
+        c_void_p,
+        ctypes.c_double,
+    ]
+    lib.GEOSCoverageCleanParams_setSnappingDistance_r.restype = c_int
     lib.GEOSCoverageCleanWithParams_r.argtypes = [c_void_p, c_void_p, c_void_p]
     lib.GEOSCoverageCleanWithParams_r.restype = c_void_p
+
+    lib.GEOSSnap_r.argtypes = [c_void_p, c_void_p, c_void_p, ctypes.c_double]
+    lib.GEOSSnap_r.restype = c_void_p
 
     lib.GEOSFree_r.argtypes = [c_void_p, c_void_p]
     lib.GEOSFree_r.restype = None
@@ -165,10 +181,14 @@ def _check_ptr(ptr: int | None, what: str) -> int:
 
 
 def _run_coverage_clean(
-    lib: ctypes.CDLL, handle: int, coll: int, gap_max_width: float | None
+    lib: ctypes.CDLL,
+    handle: int,
+    coll: int,
+    gap_max_width: float | None,
+    snap_distance: float | None,
 ) -> tuple[int, int]:
     """Invoke the appropriate GEOSCoverageClean variant; return (cleaned, params)."""
-    if gap_max_width is None:
+    if gap_max_width is None and snap_distance is None:
         cleaned = _check_ptr(
             lib.GEOSCoverageClean_r(handle, coll), "GEOSCoverageClean_r"
         )
@@ -177,10 +197,21 @@ def _run_coverage_clean(
         lib.GEOSCoverageCleanParams_create_r(handle),
         "GEOSCoverageCleanParams_create_r",
     )
-    if not lib.GEOSCoverageCleanParams_setGapMaximumWidth_r(
-        handle, params, gap_max_width
+    if (
+        gap_max_width is not None
+        and not lib.GEOSCoverageCleanParams_setGapMaximumWidth_r(
+            handle, params, gap_max_width
+        )
     ):
         msg = "GEOSCoverageCleanParams_setGapMaximumWidth_r failed"
+        raise RuntimeError(msg)
+    if (
+        snap_distance is not None
+        and not lib.GEOSCoverageCleanParams_setSnappingDistance_r(
+            handle, params, snap_distance
+        )
+    ):
+        msg = "GEOSCoverageCleanParams_setSnappingDistance_r failed"
         raise RuntimeError(msg)
     cleaned = _check_ptr(
         lib.GEOSCoverageCleanWithParams_r(handle, coll, params),
@@ -251,15 +282,24 @@ def _release(  # noqa: PLR0913
     lib.GEOS_finish_r(handle)
 
 
-def _clean_wkbs(wkbs: list[bytes], gap_max_width: float | None = None) -> list[bytes]:
+def _clean_wkbs(
+    wkbs: list[bytes],
+    gap_max_width: float | None = None,
+    snap_distance: float | None = None,
+) -> list[bytes]:
     """Pass WKBs through GEOSCoverageClean_r and return cleaned WKBs.
 
     The output preserves input element count and order: cleaned[i] is the
     cleaned form of input[i] (possibly empty if absorbed by a neighbour).
 
-    When gap_max_width is set, GEOSCoverageCleanWithParams_r is used so
-    that fully-enclosed gaps narrower than gap_max_width are merged into
-    the adjacent polygon with the longest shared border.
+    When gap_max_width is set, GEOSCoverageCleanWithParams_r merges
+    fully-enclosed gaps narrower than gap_max_width into the adjacent
+    polygon with the longest shared border.
+
+    When snap_distance is set, the same call snaps nearby vertices/edges
+    together, harmonizing adjacent polygon boundaries that touch but
+    don't share identical vertex paths (the "wiggle" pattern). Both
+    parameters can be combined in one pass.
     """
     lib = _get_lib()
     handle = _check_ptr(lib.GEOS_init_r(), "GEOS_init_r")
@@ -278,7 +318,9 @@ def _clean_wkbs(wkbs: list[bytes], gap_max_width: float | None = None) -> list[b
             ),
             "GEOSGeom_createCollection_r",
         )
-        cleaned, params = _run_coverage_clean(lib, handle, coll, gap_max_width)
+        cleaned, params = _run_coverage_clean(
+            lib, handle, coll, gap_max_width, snap_distance
+        )
         n_out = lib.GEOSGetNumGeometries_r(handle, cleaned)
         if n_out != len(wkbs):
             msg = (
@@ -306,11 +348,17 @@ def _clean_wkbs(wkbs: list[bytes], gap_max_width: float | None = None) -> list[b
 def _sliver_info(conn: DuckDBPyConnection, name: str) -> tuple[float | None, list[int]]:
     """Detect sliver gaps; return (max_width, bordering_fids).
 
-    Slivers are interior rings of ST_Union_Agg(_01) with Polsby-Popper
-    compactness (4π·area / perimeter²) below 0.5 — below the lowest plausible
-    compactness for a real polygonal feature (equilateral triangle ≈ 0.6).
-    The width returned is the maximum sliver width (2x inscribed-circle
-    radius), so all slivers fall under it and any rounder gap is preserved.
+    A sliver gap is an interior ring of ST_Union_Agg(_01) that is BOTH
+    irregularly-shaped (Polsby-Popper compactness < 0.5, below the lowest
+    plausible compactness for a real polygonal feature — equilateral triangle
+    ≈ 0.6) AND narrow relative to the dataset's spatial extent (max width
+    under _SLIVER_MAX_WIDTH_FRACTION of the union's bbox diagonal). The
+    width threshold scales with the bbox diagonal because digitization noise
+    scales with the dataset: a Congo-sized layer can have 30m slivers; a
+    city-sized layer has cm-scale ones. Real internal holes (lakes, enclaves,
+    disputed territories) sit well above this scaled threshold and must be
+    left as gaps for the Voronoi extension to divide across bordering
+    polygons — filling them here collapses the whole hole onto one neighbour.
 
     The union is unnested into single-polygon parts before counting interior
     rings; ST_NumInteriorRings on a MultiPolygon returns 0, so a coverage
@@ -322,6 +370,12 @@ def _sliver_info(conn: DuckDBPyConnection, name: str) -> tuple[float | None, lis
     row = conn.execute(f"""--sql
         WITH
         u AS (SELECT ST_Union_Agg(geom) AS g FROM "{name}_01"),
+        extent AS (
+            SELECT sqrt(power(ST_XMax(g) - ST_XMin(g), 2)
+                      + power(ST_YMax(g) - ST_YMin(g), 2))
+                   * {_SLIVER_MAX_WIDTH_FRACTION} AS max_sliver_width
+            FROM u
+        ),
         parts AS (SELECT UNNEST(ST_Dump(g)).geom AS p FROM u),
         rings AS (
             SELECT UNNEST(generate_series(1, ST_NumInteriorRings(p))) AS i, p
@@ -331,12 +385,16 @@ def _sliver_info(conn: DuckDBPyConnection, name: str) -> tuple[float | None, lis
             SELECT ST_MakePolygon(ST_InteriorRingN(p, i)) AS gap FROM rings
         ),
         slivers AS (
-            SELECT
-                gap,
-                ST_MaximumInscribedCircle(gap, 1e-9).radius * 2 AS width
-            FROM gaps
-            WHERE 4 * pi() * ST_Area(gap)
-                / (ST_Perimeter(gap) * ST_Perimeter(gap)) < {_SLIVER_COMPACTNESS_MAX}
+            SELECT gap, width FROM (
+                SELECT
+                    gap,
+                    ST_MaximumInscribedCircle(gap, 1e-9).radius * 2 AS width
+                FROM gaps
+                WHERE 4 * pi() * ST_Area(gap)
+                    / (ST_Perimeter(gap) * ST_Perimeter(gap))
+                    < {_SLIVER_COMPACTNESS_MAX}
+            )
+            WHERE width < (SELECT max_sliver_width FROM extent)
         )
         SELECT max(s.width), list(DISTINCT i.fid)
         FROM slivers s, "{name}_01" i
