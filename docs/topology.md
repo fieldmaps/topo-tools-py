@@ -49,9 +49,9 @@ When the two disagree, a `WARNING` is logged with both values. The run only fail
 
 ---
 
-## `_05_tmp2` Inner-Line Filtering
+## `_05_tmp3` Inner-Line Filtering
 
-`_05_tmp2` holds the Voronoi extension lines that are unioned with the original polygon boundaries in the final `ST_Node + ST_Polygonize` step. It must contain only lines in the **extension zone** (outside the original polygon union) — inner Voronoi lines (those running through the interior of the polygon union) must be removed, or they create spurious cells inside original polygons after polygonization.
+`_05_tmp3` holds the Voronoi extension lines that are unioned with the original polygon boundaries in the final `ST_Node + ST_Polygonize` step. It must contain only lines in the **extension zone** (outside the original polygon union) — inner Voronoi lines (those running through the interior of the polygon union) must be removed, or they create spurious cells inside original polygons after polygonization.
 
 ### Classification rule
 

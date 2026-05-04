@@ -7,19 +7,32 @@ from .config import SNAP_TOLERANCE, debug
 
 def main(conn: DuckDBPyConnection, name: str) -> None:
     """Merge original geom with extended Voronoi polygons."""
-    # Extract Voronoi boundary lines that belong to the extension zone only.
-    # ST_Difference removes every Voronoi edge that overlaps the _03a buffer
-    # (buffered original endpoints), leaving only lines that delineate the area
-    # beyond the original polygons. The NOT EXISTS filter drops any remaining
-    # segments whose interior falls inside an original polygon (_01).
-    #
-    # The bbox prefilter on the NOT EXISTS subquery is required: without it,
-    # DuckDB rewrites the correlated ST_Within into a SPATIAL_JOIN, which
-    # pre-allocates ~1x RAM as a virtual spill reservation and triggers OOMs on
-    # constrained memory budgets. With explicit ST_X/ST_Y vs ST_XMin/XMax/
-    # YMin/YMax comparisons, the planner uses HASH_JOIN + FILTER instead.
+    # _05_tmp1 (per-part _01 with precomputed bbox columns) is built first so
+    # both _05_tmp2 (NOT EXISTS prefilter) and _05 (primary join) can use its
+    # plain numeric xmin/xmax/ymin/ymax columns instead of recomputing
+    # ST_XMin/etc on the polygon per candidate pair. Per-part is more selective
+    # than multipart for country-with-islands inputs.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_05_tmp1" AS
+        WITH parts AS (
+            SELECT * EXCLUDE (geom), UNNEST(ST_Dump(geom)).geom AS part_geom
+            FROM "{name}_01"
+        )
+        SELECT
+            * EXCLUDE (part_geom),
+            part_geom,
+            ST_XMin(part_geom) AS xmin,
+            ST_XMax(part_geom) AS xmax,
+            ST_YMin(part_geom) AS ymin,
+            ST_YMax(part_geom) AS ymax
+        FROM parts
+    """)
+
+    # Bbox prefilter on the NOT EXISTS is load-bearing: ST_Within alone plans
+    # as SPATIAL_JOIN (~1x RAM virtual reservation, OOMs on constrained
+    # budgets). Explicit X/Y comparisons drop it to HASH_JOIN + FILTER.
+    conn.execute(f"""--sql
+        CREATE OR REPLACE TABLE "{name}_05_tmp2" AS
         WITH
         voronoi_lines AS (
             SELECT ST_Boundary(geom) AS geom FROM "{name}_04"
@@ -39,27 +52,23 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         SELECT s.geom
         FROM sections_pt s
         WHERE NOT EXISTS (
-            SELECT 1 FROM "{name}_01" p
-            WHERE ST_X(s.pt) >= ST_XMin(p.geom)
-              AND ST_X(s.pt) <= ST_XMax(p.geom)
-              AND ST_Y(s.pt) >= ST_YMin(p.geom)
-              AND ST_Y(s.pt) <= ST_YMax(p.geom)
-              AND ST_Within(s.pt, p.geom)
+            SELECT 1 FROM "{name}_05_tmp1" p
+            WHERE ST_X(s.pt) >= p.xmin
+              AND ST_X(s.pt) <= p.xmax
+              AND ST_Y(s.pt) >= p.ymin
+              AND ST_Y(s.pt) <= p.ymax
+              AND ST_Within(s.pt, p.part_geom)
         )
     """)
 
-    # Snap _05_tmp1 endpoints that land within snap_dist of a _02b polyline
-    # endpoint (a 3+ polygon corner) to the exact corner. GEOS intersection
-    # arithmetic in ST_Difference (_05_tmp1) can drift ~1e-7° from original
-    # polygon vertices, preventing ST_Node from creating a proper junction in
-    # _05. Snapping to the nearest segment via ST_ClosestPoint can land just
-    # past a corner (when the perpendicular projection falls on the next
-    # segment of the merged polyline), leaving a sub-nanodegree gap that fuses
-    # neighbouring polygons in ST_Polygonize. Snapping to a discrete corner
-    # set guarantees convergence at the exact corner coordinates.
+    # Snap _05_tmp2 endpoints to discrete _02b corner coords. GEOS
+    # ST_Difference drifts endpoints ~1e-7° from original vertices, which
+    # breaks ST_Node junctions in _05. Snapping to nearest segment via
+    # ST_ClosestPoint can overshoot past a corner and fuse neighbouring
+    # polygons in ST_Polygonize; discrete corners converge exactly.
     snap_dist = SNAP_TOLERANCE * 2
     conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_05_tmp2" AS
+        CREATE OR REPLACE TABLE "{name}_05_tmp3" AS
         WITH
         corners AS (
             SELECT DISTINCT pt FROM (
@@ -72,7 +81,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
             SELECT ROW_NUMBER() OVER () AS id, geom,
                 ST_StartPoint(geom) AS start_pt,
                 ST_EndPoint(geom) AS end_pt
-            FROM "{name}_05_tmp1"
+            FROM "{name}_05_tmp2"
         ),
         start_snap AS (
             SELECT e.id,
@@ -119,17 +128,17 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     if not debug:
         conn.execute(f'DROP TABLE IF EXISTS "{name}_02a"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_03a"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp1"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp2"')
 
-    # Split noding+polygonizing from the spatial join so DuckDB can release the
-    # noding working memory before SPATIAL_JOIN begins.
+    # Separate query from _05 so DuckDB releases noding working memory before
+    # the join.
     conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_05_tmp3" AS
+        CREATE OR REPLACE TABLE "{name}_05_tmp4" AS
         WITH
         lines AS (
             SELECT geom FROM "{name}_02b"
             UNION ALL
-            SELECT geom FROM "{name}_05_tmp2"
+            SELECT geom FROM "{name}_05_tmp3"
         ),
         noded AS (
             SELECT ST_Node(ST_Collect(list(geom))) AS geom FROM lines
@@ -139,71 +148,52 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     """)
     if not debug:
         conn.execute(f'DROP TABLE IF EXISTS "{name}_02b"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp2"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp3"')
 
-    # One representative interior point per polygon part (ST_Dump handles
-    # multipolygons). Used by the SPATIAL_JOIN in _05 to assign each Voronoi cell
-    # to the original polygon whose interior point falls inside it.
-    conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_05_tmp4" AS
-        WITH parts AS (
-            SELECT * EXCLUDE (geom), UNNEST(ST_Dump(geom)).geom AS part_geom
-            FROM "{name}_01"
-        )
-        SELECT * EXCLUDE (part_geom), ST_PointOnSurface(part_geom) AS pt
-        FROM parts
-    """)
-
-    # LEFT JOIN so orphan extension cells are caught by the fallback rather than
-    # silently dropped as gaps. Orphans are sub-cells too small to contain any
-    # _01 interior point (e.g. tiny slivers in stairstep boundary regions).
-    # Route each orphan to the fid whose Voronoi cell (`_04`) contains the
-    # orphan's interior point — that's the territory map the pipeline already
-    # trusts. Distance-to-nearest-_01.pt would mis-route slivers in stairstep
-    # zones, ignoring topology.
-    #
-    # The bbox prefilter on the LEFT JOIN ON clause is required: ST_Within alone
-    # plans as SPATIAL_JOIN (~1x RAM virtual reservation). With explicit
-    # ST_X/ST_Y(p.pt) vs ST_XMin/XMax/YMin/YMax(c.vgeom) comparisons, the
-    # planner uses PIECEWISE_MERGE_JOIN with ST_Within applied as a residual
-    # FILTER. The bbox predicates are necessary conditions for ST_Within so
-    # adding them does not change semantics.
+    # Match each cell by its own interior point: cell point in _01 part
+    # primary, cell point in _04 fallback. Asking the same "where does this
+    # cell live?" question against both tables routes concave-shape and
+    # sliver sub-cells to the right fid instead of misrouting via _04.
+    # (Bbox prefilter rationale: see _05_tmp2.)
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_05" AS
         WITH
         cells AS (
-            SELECT ROW_NUMBER() OVER () AS cid, geom AS vgeom FROM "{name}_05_tmp3"
+            SELECT
+                ROW_NUMBER() OVER () AS cid,
+                geom AS vgeom,
+                ST_PointOnSurface(geom) AS cpt
+            FROM "{name}_05_tmp4"
         ),
-        all_joined AS (
-            SELECT c.vgeom, p.* EXCLUDE (pt)
+        primary_match AS (
+            SELECT c.cid, c.vgeom, c.cpt,
+                   p.* EXCLUDE (part_geom, xmin, xmax, ymin, ymax)
             FROM cells c
-            LEFT JOIN "{name}_05_tmp4" AS p
-              ON ST_X(p.pt) >= ST_XMin(c.vgeom)
-             AND ST_X(p.pt) <= ST_XMax(c.vgeom)
-             AND ST_Y(p.pt) >= ST_YMin(c.vgeom)
-             AND ST_Y(p.pt) <= ST_YMax(c.vgeom)
-             AND ST_Within(p.pt, c.vgeom)
-            QUALIFY ROW_NUMBER() OVER (PARTITION BY c.cid ORDER BY p.fid NULLS LAST) = 1
+            LEFT JOIN "{name}_05_tmp1" p
+              ON ST_X(c.cpt) >= p.xmin
+             AND ST_X(c.cpt) <= p.xmax
+             AND ST_Y(c.cpt) >= p.ymin
+             AND ST_Y(c.cpt) <= p.ymax
+             AND ST_Within(c.cpt, p.part_geom)
         ),
         unmatched AS (
-            SELECT ROW_NUMBER() OVER () AS uid, vgeom,
-                   ST_PointOnSurface(vgeom) AS upt
-            FROM all_joined WHERE fid IS NULL
+            SELECT cid, vgeom, cpt
+            FROM primary_match WHERE fid IS NULL
         ),
         fallback AS (
-            SELECT u.vgeom, o.* EXCLUDE (geom)
+            SELECT u.cid, u.vgeom, o.* EXCLUDE (geom)
             FROM unmatched u
             JOIN "{name}_04" v
-              ON ST_X(u.upt) >= ST_XMin(v.geom)
-             AND ST_X(u.upt) <= ST_XMax(v.geom)
-             AND ST_Y(u.upt) >= ST_YMin(v.geom)
-             AND ST_Y(u.upt) <= ST_YMax(v.geom)
-             AND ST_Within(u.upt, v.geom)
+              ON ST_X(u.cpt) >= v.xmin
+             AND ST_X(u.cpt) <= v.xmax
+             AND ST_Y(u.cpt) >= v.ymin
+             AND ST_Y(u.cpt) <= v.ymax
+             AND ST_Within(u.cpt, v.geom)
             JOIN "{name}_01" o ON o.fid = v.fid
         )
-        SELECT * EXCLUDE (vgeom), ST_Union_Agg(vgeom) AS geom
+        SELECT * EXCLUDE (vgeom, cid), ST_Union_Agg(vgeom) AS geom
         FROM (
-            SELECT * FROM all_joined WHERE fid IS NOT NULL
+            SELECT * EXCLUDE (cpt) FROM primary_match WHERE fid IS NOT NULL
             UNION ALL
             SELECT * FROM fallback
         )
@@ -212,5 +202,5 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
 
     if not debug:
         conn.execute(f'DROP TABLE IF EXISTS "{name}_04"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp3"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp4"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp1"')

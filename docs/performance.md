@@ -69,7 +69,7 @@ Key thread-sensitivity breakdown:
 - `_04_tmp2` (fid assignment via `ST_Intersects`): 100s → 56s, 1.8× faster with more threads
 - `_04` (`ST_Union_Agg` by fid, single-threaded GEOS): ~141s → ~140s, flat — the hard ceiling
 - `_02b` (line extraction, bbox-self-join): 7.4s → 7.5s, no gain — `PIECEWISE_MERGE_JOIN` is single-threaded internally
-- `_05` (`SPATIAL_JOIN` on `_05_tmp4` ST_Within): 1.8s → 1.9s, negligible
+- `_05` (cell-point ST_Within `_01` then `_04` fallback): 1.8s → 1.9s, negligible
 
 For memory-constrained deployments: `--threads=1` gives a similar peak (~7.2 GB) to
 default threads. Both are above a 4 GB WASM/Docker target — reducing below that requires
@@ -131,11 +131,11 @@ wall time drops from ~53s → ~28s (−47%). End-to-end `_05` outputs are byte-e
 
 The same pattern applies in `merge.py` to two queries:
 
-- `_05_tmp1`: explicit bbox prefilter on the `NOT EXISTS` subquery against `_01`
-- `_05`: bbox prefilter in the `LEFT JOIN _05_tmp4 ... ON ST_Within(...)` clause
+- `_05_tmp2`: explicit bbox prefilter on the `NOT EXISTS` subquery against `_01`
+- `_05`: bbox prefilter in both the primary `LEFT JOIN _01 ... ON ST_Within(cell.cpt, _01.geom)` and the `_04` fallback join
 
 Both queries previously planned as `SPATIAL_JOIN`; with bbox predicates added, the
-`_05_tmp1` plan becomes `HASH_JOIN` + `FILTER`, and the `_05` plan becomes
+`_05_tmp2` plan becomes `HASH_JOIN` + `FILTER`, and the `_05` plan becomes
 `BLOCKWISE_NL_JOIN` with a combined bbox + `ST_Within` join condition. `BLOCKWISE_NL_JOIN`
 is O(n×m) but the inner `ST_Within` only evaluates on bbox-passing pairs (DuckDB
 short-circuits the AND chain), so cost is bounded by bbox selectivity.
@@ -154,13 +154,12 @@ memory, so they are higher than isolated `--step=merge` measurements.
 
 | Query      | RSS peak | Notes                                                              |
 | ---------- | -------- | ------------------------------------------------------------------ |
-| `_05_tmp1` | 3,797 MB | Extension line extraction (`ST_Difference` + bbox-prefiltered `NOT EXISTS` vs `_01`) |
-| `_05_tmp2` | 3,817 MB | Endpoint snapping to `_02b`; see below                             |
-| `_05_tmp3` | 4,430 MB | `ST_Node` + `ST_Polygonize`; `_02b` dropped immediately after      |
-| `_05_tmp4` | 4,432 MB | One interior point per polygon part (from `ST_Dump` on `_01`)      |
-| `_05`      | 5,953 MB | bbox-prefiltered `LEFT JOIN ST_Within` (`BLOCKWISE_NL_JOIN`) + nearest-neighbor fallback for orphan cells |
+| `_05_tmp2` | 3,797 MB | Extension line extraction (`ST_Difference` + bbox-prefiltered `NOT EXISTS` vs `_01`) |
+| `_05_tmp3` | 3,817 MB | Endpoint snapping to `_02b`; see below                             |
+| `_05_tmp4` | 4,430 MB | `ST_Node` + `ST_Polygonize`; `_02b` dropped immediately after      |
+| `_05`      | 5,953 MB | bbox-prefiltered `LEFT JOIN ST_Within(cell.cpt, _01.geom)` (`BLOCKWISE_NL_JOIN`) primary, `_04` fallback for orphan cells. Numbers measured before the inverted-join rewrite (cell-point→_01); pending re-measure. |
 
-### `_05_tmp2`: `ST_ClosestPoint` against collected geometry
+### `_05_tmp3`: `ST_ClosestPoint` against collected geometry
 
 The original approach collected all of `_02b` (391 lines, 700K points) into a single
 `MULTILINESTRING` and called `ST_ClosestPoint(collected, endpoint)` for each of 596
@@ -176,17 +175,20 @@ matching pairs. RSS delta is ~38 MB (2.5s at 1 thread).
 **Pattern to avoid**: `ST_ClosestPoint(ST_Collect(list(geom)), point)` on large tables.
 Replace with a per-segment join filtered by bounding box.
 
-### `_05`: bbox-prefiltered LEFT JOIN + nearest-neighbor fallback
+### `_05`: bbox-prefiltered LEFT JOIN + `_04` fallback
 
-After `ST_Polygonize`, Chile produces 355 cells. `_05_tmp4` materializes one interior
-point per polygon part (from `ST_Dump` on `_01`). The `LEFT JOIN ST_Within` assigns each
-cell to its source polygon; an unmatched fallback assigns orphan extension cells to the
-nearest polygon by centroid distance.
+After `ST_Polygonize`, Chile produces 355 cells. Each cell gets one interior point via
+`ST_PointOnSurface`; the primary `LEFT JOIN ST_Within(cell.cpt, _01.geom)` assigns the
+cell to whichever `_01` polygon contains its point. Unmatched cells (true extension cells
+outside all originals) fall back to a join against `_04` (Voronoi cells), routing each
+orphan to the fid whose Voronoi territory contains the cell's interior point.
 
-The `ON` clause now includes explicit `ST_X/ST_Y(p.pt)` vs `ST_XMin/XMax/YMin/YMax(c.vgeom)`
+The `ON` clauses include explicit `ST_X/ST_Y(c.cpt)` vs `ST_XMin/XMax/YMin/YMax(...)`
 bbox predicates ahead of `ST_Within`. DuckDB plans this as `BLOCKWISE_NL_JOIN` with the
 combined predicate as the join condition — no `SPATIAL_JOIN`. RSS peak at 1 thread is
-**~6.0 GB** in ~2.1s, down from ~6.5 GB under the prior `SPATIAL_JOIN` plan.
+**~6.0 GB** in ~2.1s, down from ~6.5 GB under the prior `SPATIAL_JOIN` plan. Numbers
+measured before the inverted-join rewrite and the subsequent `_05_tmp{n}` rename to
+creation order; pending re-measure.
 
 ---
 
@@ -196,8 +198,8 @@ Tested adding explicit RTREE indexes at every candidate spatial join site across
 pipeline (Chile admin3, default threads). Three configurations:
 
 - **none** — no RTREEs anywhere
-- **merge** — RTREE only on `_05_tmp3` (former default)
-- **all** — RTREEs on `_01`, `_02_tmp1`, `_04_tmp1`, and `_05_tmp3`
+- **merge** — RTREE only on `_05_tmp4` (former default)
+- **all** — RTREEs on `_01`, `_02_tmp1`, `_04_tmp1`, and `_05_tmp4`
 
 **Wall time (seconds) at key queries:**
 
@@ -207,8 +209,8 @@ pipeline (Chile admin3, default threads). Three configurations:
 | `_02b` | 18.0 | 17.6 | 17.1 | LATERAL + ST_Intersects on `_02_tmp1` |
 | `_04_tmp1` index | — | — | **0.9** | index build cost |
 | `_04_tmp2` | **50.3** | **55.9** | **57.3** | ST_Intersects join on `_04_tmp1` |
-| `_05_tmp3` index | — | 0.03 | 0.02 | index build cost |
-| `_05` | **6.1** | **6.8** | **6.0** | SPATIAL_JOIN on `_05_tmp3` |
+| `_05_tmp4` index | — | 0.03 | 0.02 | index build cost |
+| `_05` | **6.1** | **6.8** | **6.0** | SPATIAL_JOIN on `_05_tmp4` |
 
 **Result: no improvement at any site. The `_04_tmp1` RTREE is net negative.**
 
@@ -221,11 +223,11 @@ pipeline (Chile admin3, default threads). Three configurations:
   index is built and never probed. The current bbox-self-join form (see above) plans as
   `PIECEWISE_MERGE_JOIN` with explicit scalar predicates, also bypassing any RTREE.
 - `_05`: times of 6.1s / 6.8s / 6.0s across none/merge/all are noise. The RTREE on
-  `_05_tmp3` provided no measurable benefit.
-- `_05_tmp1` NOT EXISTS filter against `_01`: indistinguishable across configs.
+  `_05_tmp4` provided no measurable benefit.
+- `_05_tmp2` NOT EXISTS filter against `_01`: indistinguishable across configs.
 
-**The `_05_tmp3` RTREE has been removed.** The structural improvement in `merge.py` is
-materializing `_05_tmp3` as a real table — that decouples ST_Node/ST_Polygonize working
+**The `_05_tmp4` RTREE has been removed.** The structural improvement in `merge.py` is
+materializing `_05_tmp4` as a real table — that decouples ST_Node/ST_Polygonize working
 memory from the subsequent SPATIAL_JOIN regardless of whether any index exists on it.
 The index itself was always noise.
 
