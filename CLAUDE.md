@@ -13,6 +13,7 @@
 - Push back when you disagree, flag tradeoffs honestly, don't sugarcoat problems
 - Keep explanations brief and to the point
 - Accuracy over speed
+- Code comments: terse, max 1–2 lines, only when the WHY is non-obvious; never restate what the code does
 
 ## Project Overview
 
