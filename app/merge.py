@@ -7,11 +7,7 @@ from .config import SNAP_TOLERANCE, debug
 
 def main(conn: DuckDBPyConnection, name: str) -> None:
     """Merge original geom with extended Voronoi polygons."""
-    # _05_tmp1 (per-part _01 with precomputed bbox columns) is built first so
-    # both _05_tmp2 (NOT EXISTS prefilter) and _05 (primary join) can use its
-    # plain numeric xmin/xmax/ymin/ymax columns instead of recomputing
-    # ST_XMin/etc on the polygon per candidate pair. Per-part is more selective
-    # than multipart for country-with-islands inputs.
+    # Per-part _01 with precomputed bbox cols, reused by _05_tmp2 and _05.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_05_tmp1" AS
         WITH parts AS (
@@ -28,9 +24,11 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         FROM parts
     """)
 
-    # Bbox prefilter on the NOT EXISTS is load-bearing: ST_Within alone plans
-    # as SPATIAL_JOIN (~1x RAM virtual reservation, OOMs on constrained
-    # budgets). Explicit X/Y comparisons drop it to HASH_JOIN + FILTER.
+    # Drop only when BOTH endpoints are inside _01: midpoint test misclassed
+    # arcs that briefly dip into _01, and a single-endpoint test is too
+    # aggressive — rings can exit a void corner into _01 on a largely-void arc.
+    # Bbox prefilter avoids SPATIAL_JOIN (~1x RAM reservation, OOMs); forces
+    # HASH_JOIN + FILTER.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_05_tmp2" AS
         WITH
@@ -45,27 +43,38 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
                 FROM voronoi_lines v CROSS JOIN "{name}_03a" c
             ) WHERE NOT ST_IsEmpty(geom)
         ),
-        sections_pt AS (
-            SELECT geom, ST_PointOnSurface(geom) AS pt
+        sections AS (
+            SELECT geom,
+                ST_StartPoint(geom) AS start_pt,
+                ST_EndPoint(geom) AS end_pt
             FROM (SELECT UNNEST(ST_Dump(geom)).geom AS geom FROM cut_lines)
         )
         SELECT s.geom
-        FROM sections_pt s
+        FROM sections s
         WHERE NOT EXISTS (
             SELECT 1 FROM "{name}_05_tmp1" p
-            WHERE ST_X(s.pt) >= p.xmin
-              AND ST_X(s.pt) <= p.xmax
-              AND ST_Y(s.pt) >= p.ymin
-              AND ST_Y(s.pt) <= p.ymax
-              AND ST_Within(s.pt, p.part_geom)
+            WHERE ST_X(s.start_pt) >= p.xmin
+              AND ST_X(s.start_pt) <= p.xmax
+              AND ST_Y(s.start_pt) >= p.ymin
+              AND ST_Y(s.start_pt) <= p.ymax
+              AND ST_Within(s.start_pt, p.part_geom)
+        )
+        OR NOT EXISTS (
+            SELECT 1 FROM "{name}_05_tmp1" p
+            WHERE ST_X(s.end_pt) >= p.xmin
+              AND ST_X(s.end_pt) <= p.xmax
+              AND ST_Y(s.end_pt) >= p.ymin
+              AND ST_Y(s.end_pt) <= p.ymax
+              AND ST_Within(s.end_pt, p.part_geom)
         )
     """)
 
-    # Snap _05_tmp2 endpoints to discrete _02b corner coords. GEOS
-    # ST_Difference drifts endpoints ~1e-7° from original vertices, which
-    # breaks ST_Node junctions in _05. Snapping to nearest segment via
-    # ST_ClosestPoint can overshoot past a corner and fuse neighbouring
-    # polygons in ST_Polygonize; discrete corners converge exactly.
+    if not debug:
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_03a"')
+
+    # Snap endpoints to discrete _02b corners. ST_Difference drifts ~1e-7°,
+    # breaking ST_Node junctions; nearest-segment snap can overshoot and fuse
+    # neighbours, discrete corners converge exactly.
     snap_dist = SNAP_TOLERANCE * 2
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_05_tmp3" AS
@@ -126,12 +135,9 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     """)
 
     if not debug:
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_02a"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_03a"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp2"')
 
-    # Separate query from _05 so DuckDB releases noding working memory before
-    # the join.
+    # Separate from _05 so noding memory releases before the join.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_05_tmp4" AS
         WITH
@@ -150,11 +156,8 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         conn.execute(f'DROP TABLE IF EXISTS "{name}_02b"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp3"')
 
-    # Match each cell by its own interior point: cell point in _01 part
-    # primary, cell point in _04 fallback. Asking the same "where does this
-    # cell live?" question against both tables routes concave-shape and
-    # sliver sub-cells to the right fid instead of misrouting via _04.
-    # (Bbox prefilter rationale: see _05_tmp2.)
+    # Match each cell's interior point against _01 parts first, _04 as
+    # fallback — routes concave/sliver sub-cells to the right fid.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_05" AS
         WITH
@@ -202,5 +205,5 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
 
     if not debug:
         conn.execute(f'DROP TABLE IF EXISTS "{name}_04"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp4"')
         conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp1"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp4"')
