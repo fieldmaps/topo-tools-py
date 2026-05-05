@@ -18,7 +18,7 @@ from .config import (
     step,
     tmp_dir,
 )
-from .utils import cleanup_tmp, export_debug_tables, get_connection
+from .utils import cleanup_tmp, export_debug_tables, get_connection, log_file
 
 logger = getLogger(__name__)
 
@@ -46,30 +46,32 @@ def _run_file(path: Path) -> None:
     tmp_dir.mkdir(exist_ok=True, parents=True)
     if not step:
         cleanup_tmp(name, parquet=True)
-    conn = get_connection(name)
+    with log_file(name):
+        conn = get_connection(name)
 
-    def _interrupt(_sig: int, _frame: FrameType | None) -> Never:
-        conn.interrupt()
-        raise KeyboardInterrupt
+        def _interrupt(_sig: int, _frame: FrameType | None) -> Never:
+            conn.interrupt()
+            raise KeyboardInterrupt
 
-    old_handler = signal.signal(signal.SIGINT, _interrupt)
-    try:
-        for s, fn in _STEPS.items():
-            if not step or step == s:
-                if debug:
-                    logger.info("=== %s ===", s)
-                fn(conn, name, path)
-        if debug:
-            only = None
-            if step and step in _STEP_TABLES:
-                only = {t.format(n=name) for t in _STEP_TABLES[step]}
-            export_debug_tables(conn, only=only)
-        logger.info("done: %s", name)
-    finally:
-        signal.signal(signal.SIGINT, old_handler)
-        conn.close()
-        if not step and not debug:
-            cleanup_tmp(name)
+        old_handler = signal.signal(signal.SIGINT, _interrupt)
+        try:
+            logger.info("starting: %s", name)
+            for s, fn in _STEPS.items():
+                if not step or step == s:
+                    if debug:
+                        logger.info("=== %s ===", s)
+                    fn(conn, name, path)
+            if debug:
+                only = None
+                if step and step in _STEP_TABLES:
+                    only = {t.format(n=name) for t in _STEP_TABLES[step]}
+                export_debug_tables(conn, only=only)
+            logger.info("done: %s", name)
+        finally:
+            signal.signal(signal.SIGINT, old_handler)
+            conn.close()
+            if not step and not debug:
+                cleanup_tmp(name)
 
 
 def main() -> None:

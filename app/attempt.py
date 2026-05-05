@@ -6,7 +6,7 @@ from duckdb import DuckDBPyConnection
 from duckdb import Error as DuckDBError
 
 from . import points, voronoi
-from .config import MAX_POINTS, debug, distance
+from .config import MAX_POINTS, distance
 
 logger = getLogger(__name__)
 
@@ -34,8 +34,6 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         except (RuntimeError, DuckDBError) as e:
             logger.warning("fail: %s --distance=%s: %s", name, d, e)
         else:
-            if not debug:
-                conn.execute(f'DROP TABLE IF EXISTS "{name}_02a"')
             return
     error = f"{name} did not succeed generating voronoi polygons"
     logger.error(error)

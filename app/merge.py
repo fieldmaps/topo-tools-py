@@ -1,8 +1,13 @@
 """Unions Voronoi extensions with original polygons."""
 
+from logging import getLogger
+
 from duckdb import DuckDBPyConnection
 
 from .config import SNAP_TOLERANCE, debug
+from .utils import reassigned_fids
+
+logger = getLogger(__name__)
 
 
 def main(conn: DuckDBPyConnection, name: str) -> None:
@@ -137,6 +142,18 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     if not debug:
         conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp2"')
 
+    _polygonize_and_assign(conn, name)
+    _repair_if_needed(conn, name)
+
+
+def _polygonize_and_assign(
+    conn: DuckDBPyConnection, name: str, *, repair_clause: str = ""
+) -> None:
+    """Build _05_tmp4 (polygonize) then _05 (cell-to-fid join).
+
+    `repair_clause` optionally appends extra constraint lines (e.g. `_02a`
+    rings for fids that lost interior boundary in a prior pass).
+    """
     # Separate from _05 so noding memory releases before the join.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_05_tmp4" AS
@@ -145,6 +162,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
             SELECT geom FROM "{name}_02b"
             UNION ALL
             SELECT geom FROM "{name}_05_tmp3"
+            {repair_clause}
         ),
         noded AS (
             SELECT ST_Node(ST_Collect(list(geom))) AS geom FROM lines
@@ -152,9 +170,6 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         SELECT UNNEST(ST_Dump(ST_Polygonize(list(geom)))).geom AS geom
         FROM noded
     """)
-    if not debug:
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_02b"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp3"')
 
     # Match each cell's interior point against _01 parts first, _04 as
     # fallback — routes concave/sliver sub-cells to the right fid.
@@ -203,7 +218,24 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         GROUP BY ALL
     """)
 
-    if not debug:
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_04"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp1"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp4"')
+
+def _repair_if_needed(conn: DuckDBPyConnection, name: str) -> None:
+    """Surgical → global escalation when fids lost interior-boundary area.
+
+    Mirrors `clean.py`: try the targeted fix first, fall back to global only
+    if it fails. Global pass will OOM at Chile-coastline scale; that's the
+    same failure surface as today's INPUT NOT PRESERVED on unfixable inputs.
+    """
+    fids = reassigned_fids(conn, f"{name}_01", f"{name}_05")
+    if not fids:
+        return
+    logger.info("repair surgical: %d fid(s) reassigned, injecting _02a", len(fids))
+    fids_csv = ",".join(str(f) for f in fids)
+    surgical = f'UNION ALL SELECT geom FROM "{name}_02a" WHERE fid IN ({fids_csv})'
+    _polygonize_and_assign(conn, name, repair_clause=surgical)
+    fids = reassigned_fids(conn, f"{name}_01", f"{name}_05")
+    if not fids:
+        return
+    logger.info("repair global: %d fid(s) still reassigned, escalating", len(fids))
+    global_clause = f'UNION ALL SELECT geom FROM "{name}_02a"'
+    _polygonize_and_assign(conn, name, repair_clause=global_clause)

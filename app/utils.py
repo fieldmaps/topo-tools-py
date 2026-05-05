@@ -4,7 +4,8 @@ import contextlib
 import re
 import threading
 import time
-from logging import getLogger
+from collections.abc import Iterator
+from logging import FileHandler, Formatter, getLogger
 
 import psutil
 from duckdb import DuckDBPyConnection
@@ -124,6 +125,21 @@ class ProfiledConnection:
         return getattr(self._conn, name)
 
 
+@contextlib.contextmanager
+def log_file(name: str) -> Iterator[None]:
+    """Tee root logger to tmp/{name}.log for every run."""
+    tmp_dir.mkdir(exist_ok=True, parents=True)
+    handler = FileHandler(tmp_dir / f"{name}.log", mode="w")
+    handler.setFormatter(Formatter("%(asctime)s - %(message)s", "%Y-%m-%d %H:%M:%S"))
+    root = getLogger()
+    root.addHandler(handler)
+    try:
+        yield
+    finally:
+        root.removeHandler(handler)
+        handler.close()
+
+
 def get_connection(name: str) -> ProfiledConnection:
     """Create a file-backed DuckDB connection with spatial loaded."""
     conn = duckdb_connect(str(tmp_dir / f"{name}.duckdb"))
@@ -142,6 +158,26 @@ def has_coverage_violations(conn: DuckDBPyConnection, table: str) -> bool:
         SELECT ST_CoverageInvalidEdges_Agg(geom) IS NOT NULL
         FROM (SELECT UNNEST(ST_Dump(geom)).geom AS geom FROM "{table}")
     """).fetchall()[0][0]
+
+
+REASSIGN_THRESHOLD = 0.0001
+
+
+def reassigned_fids(
+    conn: DuckDBPyConnection, table_in: str, table_out: str
+) -> list[int]:
+    """Return fids whose input geometry isn't preserved within REASSIGN_THRESHOLD."""
+    return [
+        r[0]
+        for r in conn.execute(f"""--sql
+            SELECT i.fid
+            FROM "{table_in}" i
+            LEFT JOIN "{table_out}" o USING (fid)
+            WHERE COALESCE(ST_Area(ST_Difference(i.geom, o.geom)),
+                           ST_Area(i.geom))
+                  > ST_Area(i.geom) * {REASSIGN_THRESHOLD}
+        """).fetchall()
+    ]
 
 
 def cleanup_tmp(name: str, *, parquet: bool = False) -> None:
