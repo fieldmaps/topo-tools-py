@@ -512,7 +512,6 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     gap_max_width, sliver_fids = _sliver_info(conn, name)
     violators = sorted(set(invalid_fids) | set(sliver_fids))
     if not violators:
-        logger.info("coverage already valid; skipping clean")
         return
 
     conn.execute(
