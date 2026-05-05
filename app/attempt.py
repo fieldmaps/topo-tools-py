@@ -11,12 +11,6 @@ from .config import MAX_POINTS, distance
 logger = getLogger(__name__)
 
 
-def _check_point_count(count: int) -> None:
-    if count > MAX_POINTS:
-        msg = f"too many points: {count:,}"
-        raise RuntimeError(msg)
-
-
 def main(conn: DuckDBPyConnection, name: str) -> None:
     """Try to generate Voronoi polygons with multiple distance thresholds.
 
@@ -38,3 +32,9 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     error = f"{name} did not succeed generating voronoi polygons"
     logger.error(error)
     raise RuntimeError(error)
+
+
+def _check_point_count(count: int) -> None:
+    if count > MAX_POINTS:
+        msg = f"too many points: {count:,}"
+        raise RuntimeError(msg)

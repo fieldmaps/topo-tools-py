@@ -21,41 +21,10 @@ _GEO_PARQUET = (
 )
 _PARQUET = "(FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 15)"
 _MEM_Q = "SELECT COALESCE(SUM(memory_usage_bytes), 0) FROM duckdb_memory()"
-
-
-def _query_label(query: str) -> str:
-    q = " ".join(query.split())
-    m = re.search(r'CREATE (?:OR REPLACE )?TABLE "([^"]+)"', q, re.IGNORECASE)
-    if m:
-        return f"CREATE {m.group(1)}"
-    m = re.search(r'DROP TABLE (?:IF EXISTS )?"([^"]+)"', q, re.IGNORECASE)
-    if m:
-        return f"DROP {m.group(1)}"
-    m = re.search(r'ALTER TABLE "[^"]+" RENAME TO "([^"]+)"', q, re.IGNORECASE)
-    if m:
-        return f"RENAME TO {m.group(1)}"
-    m = re.search(r"COPY .+? TO '([^']+)'", q, re.IGNORECASE)
-    if m:
-        return f"COPY {m.group(1)}"
-    return q[:80]
-
-
-class _EagerResult:
-    """Materialized DuckDB result that survives subsequent execute() calls."""
-
-    def __init__(self, rows: list) -> None:
-        self._rows = rows
-        self._idx = 0
-
-    def fetchall(self) -> list:
-        return self._rows
-
-    def fetchone(self) -> tuple | None:
-        if self._idx < len(self._rows):
-            row = self._rows[self._idx]
-            self._idx += 1
-            return row
-        return None
+# Absolute-area floor (deg²) for ignoring FP-residue from repeated polygonize
+# operations; below this, ST_Difference returns sub-precision noise rather than
+# real reassignment.
+_FP_RESIDUE_FLOOR = 1e-15
 
 
 class ProfiledConnection:
@@ -160,13 +129,10 @@ def has_coverage_violations(conn: DuckDBPyConnection, table: str) -> bool:
     """).fetchall()[0][0]
 
 
-REASSIGN_THRESHOLD = 0.0001
-
-
 def reassigned_fids(
     conn: DuckDBPyConnection, table_in: str, table_out: str
 ) -> list[int]:
-    """Return fids whose input geometry isn't preserved within REASSIGN_THRESHOLD."""
+    """Return fids whose input geometry isn't fully preserved in the output."""
     return [
         r[0]
         for r in conn.execute(f"""--sql
@@ -174,8 +140,7 @@ def reassigned_fids(
             FROM "{table_in}" i
             LEFT JOIN "{table_out}" o USING (fid)
             WHERE COALESCE(ST_Area(ST_Difference(i.geom, o.geom)),
-                           ST_Area(i.geom))
-                  > ST_Area(i.geom) * {REASSIGN_THRESHOLD}
+                           ST_Area(i.geom)) > {_FP_RESIDUE_FLOOR}
         """).fetchall()
     ]
 
@@ -206,3 +171,38 @@ def export_debug_tables(conn: DuckDBPyConnection, only: set[str] | None = None) 
         ).fetchall()[0][0]
         opts = _GEO_PARQUET if has_geom else _PARQUET
         conn.execute(f"COPY \"{table}\" TO '{out}' {opts}")
+
+
+class _EagerResult:
+    """Materialized DuckDB result that survives subsequent execute() calls."""
+
+    def __init__(self, rows: list) -> None:
+        self._rows = rows
+        self._idx = 0
+
+    def fetchall(self) -> list:
+        return self._rows
+
+    def fetchone(self) -> tuple | None:
+        if self._idx < len(self._rows):
+            row = self._rows[self._idx]
+            self._idx += 1
+            return row
+        return None
+
+
+def _query_label(query: str) -> str:
+    q = " ".join(query.split())
+    m = re.search(r'CREATE (?:OR REPLACE )?TABLE "([^"]+)"', q, re.IGNORECASE)
+    if m:
+        return f"CREATE {m.group(1)}"
+    m = re.search(r'DROP TABLE (?:IF EXISTS )?"([^"]+)"', q, re.IGNORECASE)
+    if m:
+        return f"DROP {m.group(1)}"
+    m = re.search(r'ALTER TABLE "[^"]+" RENAME TO "([^"]+)"', q, re.IGNORECASE)
+    if m:
+        return f"RENAME TO {m.group(1)}"
+    m = re.search(r"COPY .+? TO '([^']+)'", q, re.IGNORECASE)
+    if m:
+        return f"COPY {m.group(1)}"
+    return q[:80]

@@ -41,6 +41,17 @@ _STEP_TABLES = {
 }
 
 
+def main() -> None:
+    """Run main function."""
+    logger.info("--distance=%s --debug=%s", distance, debug)
+    files = [input_file] if input_file else sorted(input_dir.iterdir())
+    for path in files:
+        if not overwrite and (output_dir / path.name).exists():
+            continue
+        if path.is_file() and path.suffix in FORMATS:
+            _run_file(path)
+
+
 def _run_file(path: Path) -> None:
     name = path.name.replace(".", "_")
     tmp_dir.mkdir(exist_ok=True, parents=True)
@@ -72,17 +83,6 @@ def _run_file(path: Path) -> None:
             conn.close()
             if not step and not debug:
                 cleanup_tmp(name)
-
-
-def main() -> None:
-    """Run main function."""
-    logger.info("--distance=%s --debug=%s", distance, debug)
-    files = [input_file] if input_file else sorted(input_dir.iterdir())
-    for path in files:
-        if not overwrite and (output_dir / path.name).exists():
-            continue
-        if path.is_file() and path.suffix in FORMATS:
-            _run_file(path)
 
 
 if __name__ == "__main__":

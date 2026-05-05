@@ -11,6 +11,33 @@ from .utils import has_coverage_violations, reassigned_fids
 logger = getLogger(__name__)
 
 
+def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
+    """Output results to path."""
+    _check_overlaps(conn, f"{name}_05")
+    _check_gaps(conn, f"{name}_05")
+    _check_input_preserved(conn, f"{name}_01", f"{name}_05")
+
+    dest = output_file or output_dir / path.name
+    dest.parent.mkdir(exist_ok=True, parents=True)
+
+    conn.execute(f"""--sql
+        COPY (
+            SELECT * EXCLUDE (fid) RENAME (geom AS geometry)
+            FROM "{name}_05"
+        ) TO '{dest}' {COPY_OPTS[path.suffix]}
+    """)
+
+    if not debug:
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_01"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_02a"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_02b"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_04"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_05"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp1"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp3"')
+        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp4"')
+
+
 def _check_overlaps(conn: DuckDBPyConnection, table: str) -> None:
     if has_coverage_violations(conn, table):
         error = f"OVERLAPS: {table}"
@@ -55,36 +82,9 @@ def _check_input_preserved(
         ORDER BY lost_pct DESC
     """).fetchall()
     details = ", ".join(
-        f"fid={fid} ({100 * pct:.2f}% reassigned: lost={lost:.4g} of {in_a:.4g})"
+        f"fid={fid} ({100 * pct:.4g}% reassigned: lost={lost:.4g} of {in_a:.4g})"
         for fid, in_a, lost, pct in bad
     )
     error = f"INPUT NOT PRESERVED: {len(bad)} feature(s); worst: {details}"
     logger.error(error)
     raise RuntimeError(error)
-
-
-def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
-    """Output results to path."""
-    _check_overlaps(conn, f"{name}_05")
-    _check_gaps(conn, f"{name}_05")
-    _check_input_preserved(conn, f"{name}_01", f"{name}_05")
-
-    dest = output_file or output_dir / path.name
-    dest.parent.mkdir(exist_ok=True, parents=True)
-
-    conn.execute(f"""--sql
-        COPY (
-            SELECT * EXCLUDE (fid) RENAME (geom AS geometry)
-            FROM "{name}_05"
-        ) TO '{dest}' {COPY_OPTS[path.suffix]}
-    """)
-
-    if not debug:
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_01"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_02a"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_02b"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_04"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_05"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp1"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp3"')
-        conn.execute(f'DROP TABLE IF EXISTS "{name}_05_tmp4"')
