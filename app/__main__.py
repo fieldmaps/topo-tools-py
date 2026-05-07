@@ -6,7 +6,12 @@ from pathlib import Path
 from types import FrameType
 from typing import Never
 
-from . import attempt, clean, inputs, lines, merge, outputs
+from . import _01_inputs as inputs
+from . import _01a_clean as clean
+from . import _02_lines as lines
+from . import _05_merge as merge
+from . import _06_outputs as outputs
+from . import attempt
 from .config import (
     FORMATS,
     debug,

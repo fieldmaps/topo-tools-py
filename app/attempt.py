@@ -5,7 +5,8 @@ from logging import getLogger
 from duckdb import DuckDBPyConnection
 from duckdb import Error as DuckDBError
 
-from . import points, voronoi
+from . import _03_points as points
+from . import _04_voronoi as voronoi
 from .config import MAX_POINTS, distance
 
 logger = getLogger(__name__)

@@ -2,8 +2,8 @@
 
 from duckdb import DuckDBPyConnection
 
+from ._05b_polygonize import run as polygonize_run
 from .config import SNAP_TOLERANCE, debug
-from .polygonize import run as polygonize_run
 
 
 def main(conn: DuckDBPyConnection, name: str) -> None:

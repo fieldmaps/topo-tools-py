@@ -30,12 +30,12 @@ RSS peak per phase for Chile admin3 at 1 thread:
 
 | Phase       | Module       | RSS Peak     | Wall time | Main bottleneck                                           |
 | ----------- | ------------ | ------------ | --------- | --------------------------------------------------------- |
-| Input       | `inputs.py`  | 680 MB       | ~1s       | I/O                                                       |
-| Lines       | `lines.py`   | 2,708 MB     | ~28s      | Self-join bbox neighbor union + GEOS line extraction      |
-| Points      | `points.py`  | 2,282 MB     | ~7s       | Interpolation + endpoint union                            |
-| **Voronoi** | `voronoi.py` | **7,249 MB** | ~275s     | `ST_VoronoiDiagram` + fid join + `ST_Union_Agg`           |
-| Merge       | `merge.py`   | 5,953 MB     | ~4s       | `ST_Node` + `ST_Polygonize` + `_05` `ST_Within` join      |
-| Outputs     | `outputs.py` | 6,005 MB     | ~3s       | `check_gaps` `ST_Union_Agg` + COPY                        |
+| Input       | `_01_inputs.py`  | 680 MB       | ~1s       | I/O                                                       |
+| Lines       | `_02_lines.py`   | 2,708 MB     | ~28s      | Self-join bbox neighbor union + GEOS line extraction      |
+| Points      | `_03_points.py`  | 2,282 MB     | ~7s       | Interpolation + endpoint union                            |
+| **Voronoi** | `_04_voronoi.py` | **7,249 MB** | ~275s     | `ST_VoronoiDiagram` + fid join + `ST_Union_Agg`           |
+| Merge       | `_05_merge.py`   | 5,953 MB     | ~4s       | `ST_Node` + `ST_Polygonize` + `_05` `ST_Within` join      |
+| Outputs     | `_06_outputs.py` | 6,005 MB     | ~3s       | `check_gaps` `ST_Union_Agg` + COPY                        |
 
 **Voronoi** (`_04_tmp1`) is the pipeline peak at ~7.2 GB. The stage has three steps:
 `_04_tmp1` collects all points and calls `ST_VoronoiDiagram` (GEOS heap, invisible to
@@ -129,7 +129,7 @@ Result on Chile at 1 thread: lines stage peak drops from 6,081 MB → 2,708 MB (
 wall time drops from ~53s → ~28s (−47%). End-to-end `_05` outputs are byte-equivalent
 (`ST_Equals` per fid, 0% sym-diff).
 
-The same pattern applies in `merge.py` to two queries:
+The same pattern applies in `_05_merge.py` to two queries:
 
 - `_05_tmp2`: explicit bbox prefilter on the `NOT EXISTS` subquery against `_01`
 - `_05`: bbox prefilter in both the primary `LEFT JOIN _01 ... ON ST_Within(cell.cpt, _01.geom)` and the `_04` fallback join
@@ -226,7 +226,7 @@ pipeline (Chile admin3, default threads). Three configurations:
   `_05_tmp4` provided no measurable benefit.
 - `_05_tmp2` NOT EXISTS filter against `_01`: indistinguishable across configs.
 
-**The `_05_tmp4` RTREE has been removed.** The structural improvement in `merge.py` is
+**The `_05_tmp4` RTREE has been removed.** The structural improvement in `_05_merge.py` is
 materializing `_05_tmp4` as a real table — that decouples ST_Node/ST_Polygonize working
 memory from the subsequent SPATIAL_JOIN regardless of whether any index exists on it.
 The index itself was always noise.
