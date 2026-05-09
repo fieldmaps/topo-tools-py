@@ -19,20 +19,16 @@ RUN curl -fsSL "https://download.osgeo.org/geos/geos-${GEOS_VERSION}.tar.bz2" \
 # Versions are intentionally unpinned — accept whatever edge/testing ships.
 FROM alpine:edge
 
-LABEL org.opencontainers.image.source="https://github.com/fieldmaps/edge-extender" \
-      org.opencontainers.image.title="edge-extender" \
-      org.opencontainers.image.description="Extend polygon boundaries outward via Voronoi diagrams"
-
 WORKDIR /srv
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 # libstdc++ is libgeos's only runtime dep on Alpine.
 RUN apk add --no-cache \
         --repository=https://dl-cdn.alpinelinux.org/alpine/edge/main \
+        --repository=https://dl-cdn.alpinelinux.org/alpine/edge/community \
         --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
-        python3 py3-duckdb libstdc++
+        python3 py3-duckdb py3-psutil libstdc++
 
 COPY --from=geos-builder /opt/geos/lib/ /usr/local/lib/
 

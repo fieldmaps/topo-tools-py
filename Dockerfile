@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 FROM python:3.14-slim AS geos-builder
 
 ARG GEOS_VERSION=3.14.1
@@ -20,22 +19,17 @@ RUN curl -fsSL "https://download.osgeo.org/geos/geos-${GEOS_VERSION}.tar.bz2" \
 
 FROM python:3.14-slim
 
-LABEL org.opencontainers.image.source="https://github.com/fieldmaps/edge-extender" \
-      org.opencontainers.image.title="edge-extender" \
-      org.opencontainers.image.description="Extend polygon boundaries outward via Voronoi diagrams"
-
 WORKDIR /srv
 
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_ROOT_USER_ACTION=ignore
+    PATH="/srv/.venv/bin:$PATH"
 
 COPY --from=geos-builder /opt/geos/lib/ /usr/local/lib/
 RUN ldconfig
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install duckdb==1.5.2 && \
+COPY pyproject.toml uv.lock ./
+RUN --mount=from=ghcr.io/astral-sh/uv,source=/uv,target=/bin/uv \
+    uv sync --frozen --no-dev --no-install-project && \
     python -c "import duckdb; duckdb.connect().execute('INSTALL spatial')"
 
 COPY app ./app
