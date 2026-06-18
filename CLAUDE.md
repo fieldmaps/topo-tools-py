@@ -62,7 +62,7 @@ The pipeline has 6 sequential stages, each a standalone module in `app/`. All st
 ### Pipeline Stages
 
 1. **`inputs.main`** — Reads geodata via DuckDB `ST_Read`, reprojects to EPSG:4326, stores as `*_01` (geometry)
-2. **`clean.main`** — Pre-checks `_01` with `ST_CoverageInvalidEdges_Agg`; if violations are found, passes feature WKBs through `GEOSCoverageClean_r` (libgeos 3.14 ctypes binding in `app/_01a_clean.py`) and rewrites `*_01` with cleaned geometries. No-op when the input coverage is already valid. Requires libgeos ≥ 3.14 — Dockerfile builds it from source; macOS dev: `brew install geos` (3.14+); set `LIBGEOS_PATH` to override discovery.
+2. **`clean.main`** — Pre-checks `_01` with `ST_CoverageInvalidEdges_Agg` and auto-detects sliver gaps via Polsby-Popper compactness; if either is found, runs `ST_CoverageClean` over the violator subset (surgical pass) and rewrites `*_01`. Falls back to a full-coverage clean if the surgical pass doesn't converge. No-op when the input coverage is already valid. Requires DuckDB spatial ≥ 1.5.3 for native `ST_CoverageClean`.
 3. **`lines.main`** — Extracts boundary lines per polygon; produces `*_02a` (exterior edges) and `*_02b` (interior/shared edges)
 4. **`attempt.main`** — Wrapper around `points.main` + `voronoi.main` that retries with doubling distance on failure (0.0002 → 0.1024, up to 10 attempts); `points.main` creates `*_03a` (buffered endpoint union) and `*_03b` (interpolated points), `voronoi.main` generates Voronoi polygons (`*_04`)
 5. **`merge.main`** — Merges Voronoi extension with original polygons via `ST_Node` + `ST_Polygonize` (`*_05`)
@@ -81,7 +81,6 @@ The pipeline has 6 sequential stages, each a standalone module in `app/`. All st
 | `OVERWRITE`                | `False`                    | Overwrite existing output                                           |
 | `DEBUG`                    | `False`                    | Keep intermediate tables, export all to Parquet, and log timing + memory delta per query |
 | `STEP`                     | (none)                     | Run only one named stage (inputs/clean/lines/attempt/merge/outputs) |
-| `LIBGEOS_PATH`             | (auto-discovered)          | Path to `libgeos_c` shared library used by `clean.main`             |
 
 ### Table Naming Convention
 

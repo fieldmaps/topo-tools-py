@@ -16,7 +16,7 @@ The pipeline previously called `gdal vector clean-coverage` (GEOS `GEOSCoverageS
 | `ST_Polygonize`               | Builds polygons from a planar noded edge network                                               |
 | `ST_MemUnion_Agg`             | Memory-efficient union aggregate                                                               |
 
-There is **no `ST_CoverageClean` or `ST_Snap`**. The GEOS coverage repair functions are not exposed.
+`ST_CoverageClean` is available as of DuckDB spatial 1.5.3 (used by the `clean` stage). `ST_Snap` is still not exposed.
 
 ### Why the naive approach creates gaps
 

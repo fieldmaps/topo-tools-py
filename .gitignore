@@ -1,6 +1,8 @@
 __pycache__
-.claude
+.claude/*
+!.claude/settings.json
 .ruff_cache
 .venv
 tmp/
 scripts/
+old_*

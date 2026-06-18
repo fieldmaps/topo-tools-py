@@ -1,20 +1,3 @@
-FROM alpine:edge AS geos-builder
-
-ARG GEOS_VERSION=3.14.1
-
-RUN apk add --no-cache build-base cmake ca-certificates curl
-
-RUN curl -fsSL "https://download.osgeo.org/geos/geos-${GEOS_VERSION}.tar.bz2" \
-        | tar xj -C /tmp \
-    && cmake -S "/tmp/geos-${GEOS_VERSION}" -B /tmp/geos-build \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX=/opt/geos \
-        -DBUILD_TESTING=OFF \
-        -DBUILD_DOCUMENTATION=OFF \
-    && cmake --build /tmp/geos-build -j"$(nproc)" \
-    && cmake --install /tmp/geos-build
-
-
 # alpine:edge is the unstable channel; py3-duckdb only exists in edge/testing.
 # Versions are intentionally unpinned — accept whatever edge/testing ships.
 FROM alpine:edge
@@ -23,14 +6,11 @@ WORKDIR /srv
 
 ENV PYTHONUNBUFFERED=1
 
-# libstdc++ is libgeos's only runtime dep on Alpine.
 RUN apk add --no-cache \
         --repository=https://dl-cdn.alpinelinux.org/alpine/edge/main \
         --repository=https://dl-cdn.alpinelinux.org/alpine/edge/community \
         --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
-        python3 py3-duckdb py3-psutil libstdc++
-
-COPY --from=geos-builder /opt/geos/lib/ /usr/local/lib/
+        python3 py3-duckdb py3-psutil
 
 RUN python3 -c "import duckdb; duckdb.connect().execute('INSTALL spatial')"
 
