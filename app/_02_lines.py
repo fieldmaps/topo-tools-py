@@ -33,7 +33,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
 
     # Exterior edges = each polygon's boundary minus its neighbour union.
     conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_02a" AS
+        CREATE OR REPLACE TABLE "{name}_02" AS
         SELECT
             a.fid,
             UNNEST(ST_Dump(ST_LineMerge(ST_CollectionExtract(
@@ -44,22 +44,6 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
             )))).geom AS geom
         FROM "{name}_02_tmp1" AS a
         LEFT JOIN "{name}_02_tmp2" AS n ON a.fid = n.afid
-    """)
-
-    # Interior edges = each polygon's boundary intersected with its neighbour
-    # union. Each shared edge appears once per adjacent polygon (double-
-    # counted), which is fine for ST_Node in merge.
-    conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{name}_02b" AS
-        SELECT UNNEST(ST_Dump(ST_LineMerge(geom))).geom AS geom
-        FROM (
-            SELECT ST_CollectionExtract(
-                ST_Intersection(a.geom, n.neighbor_union), 2
-            ) AS geom
-            FROM "{name}_02_tmp1" AS a
-            JOIN "{name}_02_tmp2" AS n ON a.fid = n.afid
-        )
-        WHERE NOT ST_IsEmpty(geom)
     """)
 
     conn.execute(f'DROP TABLE IF EXISTS "{name}_02_tmp1"')

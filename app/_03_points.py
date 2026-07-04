@@ -16,7 +16,7 @@ def main(conn: DuckDBPyConnection, name: str, distance: Decimal) -> None:
         CREATE OR REPLACE TABLE "{name}_03a" AS
         SELECT ST_Union_Agg(ST_Buffer(ST_Boundary(geom), {SNAP_TOLERANCE}))
             AS geom
-        FROM "{name}_02a"
+        FROM "{name}_02"
     """)
 
     # Interpolated points along each line minus the shared-boundary zone,
@@ -34,7 +34,7 @@ def main(conn: DuckDBPyConnection, name: str, distance: Decimal) -> None:
                     ),
                     b.geom
                 ))).geom AS geom
-            FROM "{name}_02a" AS a
+            FROM "{name}_02" AS a
             CROSS JOIN "{name}_03a" AS b
             UNION ALL
             SELECT
@@ -42,7 +42,7 @@ def main(conn: DuckDBPyConnection, name: str, distance: Decimal) -> None:
                 UNNEST(ST_Dump(ST_Boundary(
                     ST_Difference(a.geom, b.geom)
                 ))).geom AS geom
-            FROM "{name}_02a" AS a
+            FROM "{name}_02" AS a
             CROSS JOIN "{name}_03a" AS b
         )
         WHERE geom IS NOT NULL AND NOT ST_IsEmpty(geom)

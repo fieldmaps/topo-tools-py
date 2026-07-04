@@ -34,7 +34,7 @@ RSS peak per phase for Chile admin3 at 1 thread:
 | Lines       | `_02_lines.py`   | 2,708 MB     | ~28s      | Self-join bbox neighbor union + GEOS line extraction      |
 | Points      | `_03_points.py`  | 2,282 MB     | ~7s       | Interpolation + endpoint union                            |
 | **Voronoi** | `_04_voronoi.py` | **7,249 MB** | ~275s     | `ST_VoronoiDiagram` + fid join + `ST_Union_Agg`           |
-| Merge       | `_05_merge.py`   | 5,953 MB     | ~4s       | `ST_Node` + `ST_Polygonize` + `_05` `ST_Within` join      |
+| Merge       | `_05_merge.py`   | ~2,900 MB    | ~44s      | bbox-prefiltered per-fid `ST_Difference` (`_05_tmp2`) + whole-table `ST_CoverageClean` (`_05`) |
 | Outputs     | `_06_outputs.py` | 6,005 MB     | ~3s       | `check_gaps` `ST_Union_Agg` + COPY                        |
 
 **Voronoi** (`_04_tmp1`) is the pipeline peak at ~7.2 GB. The stage has three steps:
@@ -103,7 +103,7 @@ reservation — the same reservation behavior documented in `topology.md` — so
 small data the lines stage held a multi-GB working set.
 
 The current form materializes neighbor unions via a self-join with **scalar bbox
-predicates only**, then keys `_02a`/`_02b` off the resulting `_02_tmp2` table:
+predicates only**, then keys `_02` off the resulting `_02_tmp2` table:
 
 ```sql
 CREATE TABLE _02_tmp2 AS
@@ -129,66 +129,38 @@ Result on Chile at 1 thread: lines stage peak drops from 6,081 MB → 2,708 MB (
 wall time drops from ~53s → ~28s (−47%). End-to-end `_05` outputs are byte-equivalent
 (`ST_Equals` per fid, 0% sym-diff).
 
-The same pattern applies in `_05_merge.py` to two queries:
-
-- `_05_tmp2`: explicit bbox prefilter on the `NOT EXISTS` subquery against `_01`
-- `_05`: bbox prefilter in both the primary `LEFT JOIN _01 ... ON ST_Within(cell.cpt, _01.geom)` and the `_04` fallback join
-
-Both queries previously planned as `SPATIAL_JOIN`; with bbox predicates added, the
-`_05_tmp2` plan becomes `HASH_JOIN` + `FILTER`, and the `_05` plan becomes
-`BLOCKWISE_NL_JOIN` with a combined bbox + `ST_Within` join condition. `BLOCKWISE_NL_JOIN`
-is O(n×m) but the inner `ST_Within` only evaluates on bbox-passing pairs (DuckDB
-short-circuits the AND chain), so cost is bounded by bbox selectivity.
-
-After both merge patches, `_05` peak drops from 6,455 MB → 5,953 MB on Chile (1 thread).
-The `check_overlaps`/`check_gaps`/COPY tail also drops by ~500 MB each — a secondary
-effect from no longer carrying the SPATIAL_JOIN reservation across stage boundaries.
+The same bbox-self-join pattern applies in `_05_merge.py`'s `_05_tmp1`/`_05_tmp2` (see
+below) — both explode multipolygon fids into parts first, since a whole-fid bbox can
+span mainland to a remote island (Chile's Easter Island case) and defeat the prefilter
+otherwise.
 
 ---
 
 ## Merge stage memory profile (Chile)
 
-Full-pipeline RSS peaks for the merge stage queries at 1 thread. Note: these include the
-buffer pool from all prior-stage tables (`_01`, `_02b`, `_04`, etc.) that are resident in
-memory, so they are higher than isolated `--step=merge` measurements.
+RSS peaks for the merge stage queries at 1 thread, measured with `--step=merge --debug`
+on a database file that already has all prior-stage tables resident (`_01`, `_02`, `_03a`,
+`_03b`, `_04`), per the profiling methodology above.
 
-| Query      | RSS peak | Notes                                                              |
-| ---------- | -------- | ------------------------------------------------------------------ |
-| `_05_tmp2` | 3,797 MB | Extension line extraction (`ST_Difference` + bbox-prefiltered `NOT EXISTS` vs `_01`) |
-| `_05_tmp3` | 3,817 MB | Endpoint snapping to `_02b`; see below                             |
-| `_05_tmp4` | 4,430 MB | `ST_Node` + `ST_Polygonize`; `_02b` dropped immediately after      |
-| `_05`      | 5,953 MB | bbox-prefiltered `LEFT JOIN ST_Within(cell.cpt, _01.geom)` (`BLOCKWISE_NL_JOIN`) primary, `_04` fallback for orphan cells. Numbers measured before the inverted-join rewrite (cell-point→_01); pending re-measure. |
+| Query      | Time   | RSS peak | Notes                                                              |
+| ---------- | ------ | -------- | ------------------------------------------------------------------ |
+| `_05_tmp1` | 0.2s   | 495 MB   | Per-part `_01` with bbox columns (parts, not whole fids)           |
+| `_05_tmp2` | 22.8s  | 2,900 MB | Per-fid bbox-prefiltered neighbor union + `ST_Difference` against `_04`; pipeline peak for this stage |
+| `_05_tmp3` | 19.7s  | 2,068 MB | Dissolve to one row per fid, reattach original attributes         |
+| `_05`      | 1.6s   | 1,815 MB | Whole-table `ST_CoverageClean` via the shared `coverage_clean` helper |
 
-### `_05_tmp3`: `ST_ClosestPoint` against collected geometry
+Total ≈44s, peak ≈2.9 GB — down 51% from the previous `ST_Node`/`ST_Polygonize` design's
+5,953 MB peak, though wall time is roughly 10× slower (~4s → ~44s). The `_05_tmp2` bbox
+self-join (Voronoi cell vs. original-polygon-part bboxes) is the new bottleneck; the
+`ST_CoverageClean` call itself is cheap and was not the risk this design predicted —
+memory pressure came from the union/difference step, not the coverage-clean step.
 
-The original approach collected all of `_02b` (391 lines, 700K points) into a single
-`MULTILINESTRING` and called `ST_ClosestPoint(collected, endpoint)` for each of 596
-extension-line endpoints. This caused a **~6.8 GB** peak — GEOS allocates large internal
-structures when processing a 700K-point geometry.
-
-Fix: per-segment bbox pre-filter. For each endpoint, identify candidate `_02b` segments
-via coordinate range comparison (`ST_XMin/XMax/YMin/YMax`), then call `ST_ClosestPoint`
-only on matching segments. With `SNAP_TOLERANCE = 1e-8`, almost all of the 596 × 391 =
-233K pairs are eliminated cheaply, and `ST_ClosestPoint` is called only on the ~370
-matching pairs. RSS delta is ~38 MB (2.5s at 1 thread).
-
-**Pattern to avoid**: `ST_ClosestPoint(ST_Collect(list(geom)), point)` on large tables.
-Replace with a per-segment join filtered by bounding box.
-
-### `_05`: bbox-prefiltered LEFT JOIN + `_04` fallback
-
-After `ST_Polygonize`, Chile produces 355 cells. Each cell gets one interior point via
-`ST_PointOnSurface`; the primary `LEFT JOIN ST_Within(cell.cpt, _01.geom)` assigns the
-cell to whichever `_01` polygon contains its point. Unmatched cells (true extension cells
-outside all originals) fall back to a join against `_04` (Voronoi cells), routing each
-orphan to the fid whose Voronoi territory contains the cell's interior point.
-
-The `ON` clauses include explicit `ST_X/ST_Y(c.cpt)` vs `ST_XMin/XMax/YMin/YMax(...)`
-bbox predicates ahead of `ST_Within`. DuckDB plans this as `BLOCKWISE_NL_JOIN` with the
-combined predicate as the join condition — no `SPATIAL_JOIN`. RSS peak at 1 thread is
-**~6.0 GB** in ~2.1s, down from ~6.5 GB under the prior `SPATIAL_JOIN` plan. Numbers
-measured before the inverted-join rewrite and the subsequent `_05_tmp{n}` rename to
-creation order; pending re-measure.
+**A single global `ST_Union_Agg(_01)` used as the `ST_Difference` operand OOMs outright**
+at Chile scale (`failed to allocate data of size 16.0 MiB (12.7 GiB/12.7 GiB used)`,
+observed during development) — the union itself is cheap to compute, but using a
+multi-million-vertex geometry as a per-row `ST_Difference` argument against thousands of
+fids is a different, much more expensive access pattern. The bbox-prefiltered per-part
+neighbor union above is the fix; see `docs/topology.md`, "Why not a single global union."
 
 ---
 

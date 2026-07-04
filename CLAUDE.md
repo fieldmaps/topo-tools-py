@@ -57,16 +57,15 @@ Pre-commit hooks run `uv-sync`, `ruff-format`, and `ruff-check` automatically.
 
 ## Architecture
 
-The pipeline has 6 sequential stages, each a standalone module in `app/`. All stages share a single file-backed DuckDB connection; tables are the IPC mechanism between stages. `__main__.py` chains all stages together in a sequential for-loop over input files.
+The pipeline has 5 sequential stages, each a standalone module in `app/`. All stages share a single file-backed DuckDB connection; tables are the IPC mechanism between stages. `__main__.py` chains all stages together in a sequential for-loop over input files.
 
 ### Pipeline Stages
 
-1. **`inputs.main`** — Reads geodata via DuckDB `ST_Read`, reprojects to EPSG:4326, stores as `*_01` (geometry)
-2. **`clean.main`** — Pre-checks `_01` with `ST_CoverageInvalidEdges_Agg` and auto-detects sliver gaps via Polsby-Popper compactness; if either is found, runs `ST_CoverageClean` over the violator subset (surgical pass) and rewrites `*_01`. Falls back to a full-coverage clean if the surgical pass doesn't converge. No-op when the input coverage is already valid. Requires DuckDB spatial ≥ 1.5.3 for native `ST_CoverageClean`.
-3. **`lines.main`** — Extracts boundary lines per polygon; produces `*_02a` (exterior edges) and `*_02b` (interior/shared edges)
-4. **`attempt.main`** — Wrapper around `points.main` + `voronoi.main` that retries with doubling distance on failure (0.0002 → 0.1024, up to 10 attempts); `points.main` creates `*_03a` (buffered endpoint union) and `*_03b` (interpolated points), `voronoi.main` generates Voronoi polygons (`*_04`)
-5. **`merge.main`** — Merges Voronoi extension with original polygons via `ST_Node` + `ST_Polygonize` (`*_05`)
-6. **`outputs.main`** — Validates topology, joins geometry with original attributes, exports via DuckDB COPY
+1. **`inputs.main`** — Reads geodata via DuckDB `ST_Read`, reprojects to EPSG:4326, stores as `*_01` (geometry). Then pre-checks `_01` with `ST_CoverageInvalidEdges_Agg`; if it finds invalid edges, runs `ST_CoverageClean` over the whole table and rewrites `*_01` in place. No-op otherwise. Requires DuckDB spatial ≥ 1.5.3 for native `ST_CoverageClean`. Does not distinguish real holes from digitization slivers — inputs are expected to be pre-cleaned upstream; any narrow gap that slips through is treated the same as a real hole and left for `merge.main`'s Voronoi extension to divide. Byte-exact preservation of untouched polygons is not a goal — see Key Patterns.
+2. **`lines.main`** — Extracts each polygon's exterior boundary (its own boundary minus a bbox-prefiltered union of its neighbors' boundaries); produces `*_02`
+3. **`attempt.main`** — Wrapper around `points.main` + `voronoi.main` that retries with doubling distance on failure (0.0002 → 0.1024, up to 10 attempts); `points.main` creates `*_03a` (buffered endpoint union) and `*_03b` (interpolated points), `voronoi.main` generates Voronoi polygons (`*_04`)
+4. **`merge.main`** — Unions each fid's original geometry with its Voronoi extension (`*_04`) minus a bbox-prefiltered union of nearby originals, then runs a single whole-table `ST_CoverageClean` pass to close floating-point-scale seams (`*_05`)
+5. **`outputs.main`** — Validates topology and exports via DuckDB COPY
 
 ### Configuration
 
@@ -80,27 +79,27 @@ The pipeline has 6 sequential stages, each a standalone module in `app/`. All st
 | `THREADS`                  | (unset)                    | DuckDB thread count; unset defers to DuckDB default                 |
 | `OVERWRITE`                | `False`                    | Overwrite existing output                                           |
 | `DEBUG`                    | `False`                    | Keep intermediate tables, export all to Parquet, and log timing + memory delta per query |
-| `STEP`                     | (none)                     | Run only one named stage (inputs/clean/lines/attempt/merge/outputs) |
+| `STEP`                     | (none)                     | Run only one named stage (inputs/lines/attempt/merge/outputs)       |
 
 ### Table Naming Convention
 
 Tables are named `{name}_{stage}[suffix]` where stage is a two-digit number and suffix is either empty, a letter, or `_tmp{n}`:
 
 - **No suffix** — stage produces exactly one persistent table (e.g. `_01`, `_04`, `_05`)
-- **Letter suffix (`_02a`, `_02b`)** — stage produces multiple persistent tables; **all** of them get a letter, including the first. Never leave one bare while siblings have letters.
+- **Letter suffix (`_03a`, `_03b`)** — stage produces multiple persistent tables; **all** of them get a letter, including the first. Never leave one bare while siblings have letters.
 - **`_tmp{n}` suffix** — table is dropped within the same file before the function returns; not visible to downstream stages unless `--debug` is set
 
-The current sequence: `_01` → `_02a/_02b` → `_03a/_03b` → `_04` → `_05`. The `clean` stage rewrites `_01` in place when violations are detected; it does not introduce a new suffix.
+The current sequence: `_01` → `_02` → `_03a/_03b` → `_04` → `_05`. `inputs.main`'s coverage-clean pass rewrites `_01` in place when violations are detected; it does not introduce a new suffix.
 
 ### Key Patterns
 
 - **DuckDB spatial extension** handles all geometry operations (`ST_*` functions). One file-backed connection is created per input file in `utils.py` and returned as a `ProfiledConnection` proxy that logs timing and memory per query when `--debug` is set.
 - **DuckDB tables as IPC** — stages read and write named tables on the shared connection; no Parquet between stages.
-- **Topology validation** in `checks.py`: `check_overlaps`, `check_gaps`, and `check_missing_rows` always run in outputs. All three unnest MultiPolygon geometries before checking to ensure correct coverage validation across individual polygon pieces.
+- **Topology validation** in `_06_outputs.py` (`_check_overlaps`, `_check_gaps`) always runs in outputs, backed by `has_coverage_violations` in `utils.py`. Both unnest MultiPolygon geometries before checking to ensure correct coverage validation across individual polygon pieces. There is no byte-exactness check — see below.
 - **Geometry column names**: `geom` in DuckDB tables, `geometry` in final output.
-- **Avoid `ST_ClosestPoint(ST_Collect(list(geom)), point)` on large tables.** Collecting thousands of lines into one geometry before calling `ST_ClosestPoint` causes GEOS to allocate large internal acceleration structures — ~6.8 GB for Chile's 700K-point `_02b`. Instead, use a per-segment bbox pre-filter: CROSS JOIN with the source table and filter by `ST_XMin/XMax/YMin/YMax` before calling `ST_ClosestPoint` on only the matching segments. See `_05_tmp3` in `_05_merge.py`.
-- **`duckdb_memory()` measurements in isolation underestimate pipeline peaks.** A fresh connection with few tables in the DuckDB file can show 4 GB for a query that peaks at 8 GB in a full pipeline run, because the buffer pool from other large tables (`_01`, `_04`, `_02b`, etc.) adds several GB of additional pressure. Profile with `--step=X --debug` on a database file that already has all prior-stage tables present.
-- **Polygon interior point: `ST_MaximumInscribedCircle(geom).center`, not `ST_Centroid`.** Centroids fall outside concave shapes (C-shapes, fjords). Polygons only — keep `ST_PointOnSurface` for lines. Slower (iterative); fine per-row, profile inside joins.
+- **`duckdb_memory()` measurements in isolation underestimate pipeline peaks.** A fresh connection with few tables in the DuckDB file can show 4 GB for a query that peaks at 8 GB in a full pipeline run, because the buffer pool from other large tables (`_01`, `_04`, `_05_tmp1`, etc.) adds several GB of additional pressure. Profile with `--step=X --debug` on a database file that already has all prior-stage tables present.
+- **Avoid materializing one global `ST_Union_Agg` of `_01` as a per-row `ST_Difference`/join operand.** At Chile scale the union can hold millions of vertices; using it as an operand against every fid individually made GEOS pay that cost on every row and OOM'd outright (confirmed during development of `_05_merge.py`). Use a bbox-prefiltered join against nearby originals instead (see `_02_lines.py`'s neighbor-union self-join and `_05_merge.py`'s `_05_tmp1`/`_05_tmp2`, both of which explode multipolygon fids into parts first — a whole-fid bbox can span mainland-to-remote-island and defeat the prefilter).
+- **Byte-exact preservation of original polygon vertices is not a goal.** `ST_CoverageClean` may shift any polygon's boundary, including previously-untouched ones. Don't reintroduce per-fid violator scoping, snapshot/restore, or escalation logic to protect vertex-level exactness — that machinery was removed deliberately (see `docs/topology.md`).
 
 ### Supported Formats
 

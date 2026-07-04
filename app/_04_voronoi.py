@@ -35,22 +35,12 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
 
     # Union Voronoi cells by fid. ST_MakeValid defends against invalid cells
     # produced by ST_VoronoiDiagram on degenerate point configurations — feeding
-    # an invalid polygon to ST_Union_Agg segfaults GEOS. Precomputed bbox columns
-    # let downstream joins use plain numeric comparisons instead of recomputing
-    # ST_XMin/etc per candidate pair.
+    # an invalid polygon to ST_Union_Agg segfaults GEOS.
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{name}_04" AS
-        WITH unioned AS (
-            SELECT fid, ST_Union_Agg(ST_MakeValid(geom)) AS geom
-            FROM "{name}_04_tmp2"
-            GROUP BY fid
-        )
-        SELECT fid, geom,
-            ST_XMin(geom) AS xmin,
-            ST_XMax(geom) AS xmax,
-            ST_YMin(geom) AS ymin,
-            ST_YMax(geom) AS ymax
-        FROM unioned
+        SELECT fid, ST_Union_Agg(ST_MakeValid(geom)) AS geom
+        FROM "{name}_04_tmp2"
+        GROUP BY fid
     """)
 
     if not debug:

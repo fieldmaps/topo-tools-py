@@ -38,7 +38,7 @@ parser.add_argument("--debug", **_bool_flag("DEBUG"))
 parser.add_argument(
     "--step",
     default=getenv("STEP"),
-    choices=["inputs", "clean", "lines", "attempt", "merge", "outputs"],
+    choices=["inputs", "lines", "attempt", "merge", "outputs"],
 )
 args = parser.parse_args()
 

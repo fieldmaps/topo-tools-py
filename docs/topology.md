@@ -4,6 +4,22 @@
 
 The pipeline previously called `gdal vector clean-coverage` (GEOS `GEOSCoverageSimplify`/repair) at the inputs and merge stages. It has been removed. This section records what DuckDB can and cannot replicate, and the approach that was chosen.
 
+## Merge: union + difference + whole-table `ST_CoverageClean`
+
+`merge.main` produces `_05` by:
+
+1. Unioning each fid's original geometry with its Voronoi extension (`_04`) minus a bbox-prefiltered union of nearby originals (per-fid `ST_Difference`, not one global union used as the operand — see "Why not a single global union" below).
+2. Dissolving to one row per fid and reattaching original attributes.
+3. Running a single whole-table `ST_CoverageClean` call (via the shared `coverage_clean` helper in `utils.py`, also used by `inputs.main`'s coverage-clean pass) to close the floating-point-scale seams that the independent per-fid `ST_Difference` calls leave behind — the same failure mode described below under "Why the naive approach creates gaps," now fixed by the native function instead of hand-rolled noding.
+
+This replaced an earlier `ST_Node` + `ST_Polygonize` design (kept below for historical context) that existed only because DuckDB spatial had no native `ST_CoverageClean` at the time it was built — confirmed by recovering the original PostGIS implementation (`git show f6a3b67:app_postgis/merge.py`), which used exactly this union+difference+coverage-clean pattern (via PostGIS's `ST_CoverageClean(geom) OVER ()` window function) long before the DuckDB port. Byte-exact preservation of original polygon vertices is not a goal of the current design — `ST_CoverageClean` may shift any polygon's boundary, including ones that weren't touched by the union/difference step.
+
+### Why not a single global union as the `ST_Difference` operand
+
+Using `ST_Union_Agg(_01)` — a single dissolved reference geometry — as the second argument to `ST_Difference` for every fid individually OOMs outright at Chile scale: the union can hold millions of vertices, and GEOS pays that cost on every row (`failed to allocate data of size 16.0 MiB (12.7 GiB/12.7 GiB used)`, observed during development). The fix is the same bbox-prefiltered neighbor-union self-join pattern `_02_lines.py` already uses for exterior-edge extraction — join `_04` against per-part (not per-fid) bboxes of `_01`, since a single Chile fid's multipolygon bbox can span mainland to a remote island and defeat the prefilter if not exploded into parts first.
+
+### Historical: why `ST_Node` + `ST_Polygonize` was used instead (now removed)
+
 ### What DuckDB spatial exposes
 
 | Function                      | Purpose                                                                                        |
@@ -16,7 +32,7 @@ The pipeline previously called `gdal vector clean-coverage` (GEOS `GEOSCoverageS
 | `ST_Polygonize`               | Builds polygons from a planar noded edge network                                               |
 | `ST_MemUnion_Agg`             | Memory-efficient union aggregate                                                               |
 
-`ST_CoverageClean` is available as of DuckDB spatial 1.5.3 (used by the `clean` stage). `ST_Snap` is still not exposed.
+`ST_CoverageClean` is available as of DuckDB spatial 1.5.3 (used by `inputs.main`'s coverage-clean pass and by `merge.main`). `ST_Snap` is still not exposed.
 
 ### Why the naive approach creates gaps
 
@@ -36,54 +52,9 @@ Applying `ST_ReducePrecision` to only the extension pieces (not originals) makes
 
 This produces **0 gaps, 0 overlaps, 0 `ST_CoverageInvalidEdges`** on all tested datasets. Original polygon vertex coordinates are never modified — the noding only adds collinear intermediate vertices where Voronoi edges cross original polygon edges, which is geometrically identical.
 
-### Topology checks (`checks.py`)
+### Topology checks (`_06_outputs.py`)
 
-Both a **strict** and an **area-based** check are run and compared:
-
-| Check    | Strict                                    | Area-based (authoritative)                      |
-| -------- | ----------------------------------------- | ----------------------------------------------- |
-| Overlaps | `ST_CoverageInvalidEdges_Agg IS NOT NULL` | `ST_Area(ST_Intersection) > 1e-10`              |
-| Gaps     | `ST_NumInteriorRings(ST_Union_Agg) > 0`   | `ST_Area(ST_Difference(extent, union)) > 1e-10` |
-
-When the two disagree, a `WARNING` is logged with both values. The run only fails on the area-based result. `AREA_EPSILON = 1e-10` (≈ 0.1 m²) is the threshold below which a discrepancy is treated as a floating-point artifact rather than a real topology error.
-
----
-
-## `_05_tmp3` Inner-Line Filtering
-
-`_05_tmp3` holds the Voronoi extension lines that are unioned with the original polygon boundaries in the final `ST_Node + ST_Polygonize` step. It must contain only lines in the **extension zone** (outside the original polygon union) — inner Voronoi lines (those running through the interior of the polygon union) must be removed, or they create spurious cells inside original polygons after polygonization.
-
-### Classification rule
-
-A section segment is **inner** if its representative point lies within any original polygon. It is **outer** otherwise. Segments whose middle briefly crosses a polygon boundary but whose endpoints are outside are treated as outer — this is an accepted edge case where the downstream polygonization handles any sliver gracefully.
-
-### `ST_PointOnSurface` is the right test
-
-`ST_PointOnSurface` on a linestring returns the **midpoint by length** (deterministic, not random, not the centroid). This is more robust than testing endpoints because:
-
-- **Narrow-notch edge case**: a V-shaped crack in the polygon boundary can cause one endpoint of an outer line to land inside the polygon, even though the line itself passes through the gap and is correctly an extension line. The midpoint lands in the exterior portion and the line is kept.
-- **Crossing-at-midpoint edge case**: a line whose middle crosses into a polygon at exactly the midpoint would be incorrectly removed, but this is rare and less harmful than removing real extension lines.
-
-### Final implementation
-
-```sql
-WHERE NOT EXISTS (
-    SELECT 1 FROM "{name}_01" p
-    WHERE ST_Within(ST_PointOnSurface(s.geom), p.geom)
-)
-```
-
-This replaces the original `ST_Union_Agg(geom) FROM _01` union approach. The union materialised a large merged polygon in memory — expensive and problematic for DuckDB-WASM and memory-limited Docker. The anti-join tests the midpoint against individual polygon rows, allowing DuckDB to short-circuit as soon as one containing polygon is found.
-
-### Approaches ruled out
-
-| Approach                                        | Reason rejected                                                                                                                                                                                |
-| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ST_Union_Agg(_01)`                             | Materialises large intermediate geometry; expensive in WASM/Docker                                                                                                                             |
-| `ST_ConvexHull(_01)`                            | Fast but incorrect for concave geographies (e.g. Chile coastline)                                                                                                                              |
-| `ST_Polygonize(_02)`                            | Profiled as more expensive than the union                                                                                                                                                      |
-| `is_extension` flag on Voronoi cells            | All Voronoi cells straddle the interior/extension boundary — seed points are on exterior polygon edges, so cells spread both inward and outward. No cell is purely interior or purely exterior |
-| Endpoint test (`ST_StartPoint` / `ST_EndPoint`) | Fails for the narrow-notch edge case described above                                                                                                                                           |
+`_check_overlaps` (`ST_CoverageInvalidEdges_Agg(geom) IS NOT NULL`, via `utils.has_coverage_violations`) and `_check_gaps` (`ST_NumInteriorRings(ST_Union_Agg(geom)) > 0`) run on the final `_05` table and raise `RuntimeError` on failure. Both unnest MultiPolygon rows into single-polygon parts first, so a coverage split into multiple parts (e.g. mainland + offshore islet) doesn't hide a real interior-ring gap. There is no separate area-based check or epsilon-based warning tier — these are the only two topology gates in the pipeline.
 
 ---
 
@@ -95,7 +66,9 @@ DuckDB 1.5.2's `SPATIAL_JOIN` operator pre-allocates approximately **1× physica
 
 **What triggers `SPATIAL_JOIN`**: Any `ST_Within` / `ST_Contains` predicate in a JOIN. DuckDB's optimizer always rewrites to `SPATIAL_JOIN` — correlated subqueries, `LATERAL` joins, and batching all produce the same plan.
 
-**Workaround** (implemented in `utils.spatial_join_memory`): The reservation is a virtual address claim — no physical pages are mapped. Any `memory_limit` above the reservation threshold passes the check. Setting the limit to `'999GB'` always exceeds the reservation on any real machine; restoring the original value afterward is cheap and platform-independent.
+**Current mitigation**: the pipeline avoids this class of bug entirely rather than working around it — no stage uses `ST_Within`/`ST_Contains` in a JOIN condition. Bbox-prefiltered self-/cross-joins with scalar predicates (`_02_lines.py`'s neighbor-union, `_05_merge.py`'s `_05_tmp2`) plan as `PIECEWISE_MERGE_JOIN` instead, which never triggers the reservation.
+
+If a future stage genuinely needs a true `ST_Within`/`ST_Contains` join, the reservation is a virtual address claim (no physical pages mapped), so any `memory_limit` above the reservation threshold passes the check:
 
 ```python
 @contextmanager
@@ -108,6 +81,6 @@ def spatial_join_memory(conn):
         conn.execute(f"SET memory_limit = '{orig}'")
 ```
 
-Used in `merge.main` around the two `ST_Within` spatial joins.
+Don't reach for an explicit RTREE index instead — it was profiled as providing no measurable benefit once DuckDB's own `SPATIAL_JOIN` rewrite already builds its own temporary index (see `docs/performance.md`, "RTREE index experiment").
 
-**Note**: R-tree indexes (`CREATE INDEX ... USING RTREE (geom)`) are required before the spatial joins for efficient probing. May be fixed in DuckDB versions after 1.5.2 — re-test if upgrading.
+**Note**: May be fixed in DuckDB versions after 1.5.2 — re-test if upgrading.

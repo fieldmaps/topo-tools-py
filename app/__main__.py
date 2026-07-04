@@ -7,7 +7,6 @@ from types import FrameType
 from typing import Never
 
 from . import _01_inputs as inputs
-from . import _01a_clean as clean
 from . import _02_lines as lines
 from . import _05_merge as merge
 from . import _06_outputs as outputs
@@ -29,7 +28,6 @@ logger = getLogger(__name__)
 
 _STEPS = {
     "inputs": inputs.main,
-    "clean": lambda conn, name, _path: clean.main(conn, name),
     "lines": lambda conn, name, _path: lines.main(conn, name),
     "attempt": lambda conn, name, _path: attempt.main(conn, name),
     "merge": lambda conn, name, _path: merge.main(conn, name),
@@ -38,10 +36,9 @@ _STEPS = {
 
 _STEP_TABLES = {
     "inputs": ["{n}_01"],
-    "clean": ["{n}_01"],
-    "lines": ["{n}_02a", "{n}_02b"],
+    "lines": ["{n}_02"],
     "attempt": ["{n}_03a", "{n}_03b", "{n}_04", "{n}_04_tmp1", "{n}_04_tmp2"],
-    "merge": ["{n}_05", "{n}_05_tmp1", "{n}_05_tmp2", "{n}_05_tmp3", "{n}_05_tmp4"],
+    "merge": ["{n}_05", "{n}_05_tmp1", "{n}_05_tmp2", "{n}_05_tmp3"],
     "outputs": [],
 }
 
