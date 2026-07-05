@@ -1,8 +1,13 @@
-# Edge Extender
+# topo-tools
 
 ![](https://raw.githubusercontent.com/fieldmaps/edge-extender/main/img/wld_01.png)
 
-This tool takes polygons as an input and applies the voronoi algorithm along edges, giving results similar to a euclidean allocation raster. Unlike euclidean allocation, the source is never transformed from vector to raster. All internal polygon topology remains unchanged, with the exception of internal holes which are filled in the same way the exterior is filled out.
+`topo-tools` is a collection of DuckDB-powered geospatial topology utilities. It
+currently ships one tool, **extend**: it takes polygons as input and applies the
+Voronoi algorithm along edges, giving results similar to a euclidean allocation
+raster. Unlike euclidean allocation, the source is never transformed from vector to
+raster. All internal polygon topology remains unchanged, with the exception of
+internal holes which are filled in the same way the exterior is filled out.
 
 ## Supported Formats
 
@@ -10,22 +15,36 @@ Currently, supported inputs are polygons in GeoParquet (.parquet). GeoPackage (.
 
 ## Usage
 
-The only requirements are to install [Docker Desktop](https://www.docker.com/products/docker-desktop). Pull in the image with the following:
+### Python
 
 ```sh
-docker pull ghcr.io/fieldmaps/edge-extender
+pip install topo-tools
 ```
 
-To run against a single file:
+```python
+from topo_tools import extend
+
+extend("example.geojson", "example_extended.geojson", memory_gb=4)
+```
+
+### CLI
+
+Installing the package also installs a `topo-tools` command:
 
 ```sh
-docker run -v .:/srv ghcr.io/fieldmaps/edge-extender --input-file=example.geojson --output-file=example.geojson
+topo-tools extend --input-file=example.geojson --output-file=example.geojson
+```
+
+Or, without installing, via `python -m`:
+
+```sh
+python -m topo_tools extend --input-file=example.geojson --output-file=example.geojson
 ```
 
 To process an entire directory of files:
 
 ```sh
-docker run -v .:/srv ghcr.io/fieldmaps/edge-extender --input-dir=inputs --output-dir=outputs
+topo-tools extend --input-dir=inputs --output-dir=outputs
 ```
 
 The following options are available:

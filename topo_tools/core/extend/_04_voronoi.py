@@ -2,10 +2,8 @@
 
 from duckdb import DuckDBPyConnection
 
-from .config import debug
 
-
-def main(conn: DuckDBPyConnection, name: str) -> None:
+def main(conn: DuckDBPyConnection, name: str, *, debug: bool = False) -> None:
     """Create Voronoi polygons from points."""
     # Voronoi diagram from all input points
     conn.execute(f"""--sql

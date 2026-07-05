@@ -7,3 +7,6 @@ tmp/
 scripts/
 old_*
 .tmp
+dist/
+build/
+*.egg-info

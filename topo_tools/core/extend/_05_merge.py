@@ -2,11 +2,11 @@
 
 from duckdb import DuckDBPyConnection
 
-from .config import SNAP_TOLERANCE, debug
-from .utils import coverage_clean
+from ._constants import SNAP_TOLERANCE
+from ._coverage import coverage_clean
 
 
-def main(conn: DuckDBPyConnection, name: str) -> None:
+def main(conn: DuckDBPyConnection, name: str, *, debug: bool = False) -> None:
     """Merge original geometry with Voronoi extensions, then coverage-clean seams."""
     # Per-part _01 with bbox cols. Parts (not whole multipolygon fids) keep the
     # bbox tight — a Chile fid can span mainland to a remote island, which would

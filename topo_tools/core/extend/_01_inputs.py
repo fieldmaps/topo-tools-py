@@ -5,7 +5,7 @@ from pathlib import Path
 
 from duckdb import DuckDBPyConnection
 
-from .utils import coverage_clean, has_coverage_violations
+from ._coverage import coverage_clean, has_coverage_violations
 
 logger = getLogger(__name__)
 

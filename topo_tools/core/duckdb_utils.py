@@ -6,12 +6,11 @@ import threading
 import time
 from collections.abc import Iterator
 from logging import FileHandler, Formatter, getLogger
+from pathlib import Path
 
 import psutil
 from duckdb import DuckDBPyConnection
 from duckdb import connect as duckdb_connect
-
-from .config import debug, num_threads, tmp_dir
 
 _PROCESS = psutil.Process()
 logger = getLogger(__name__)
@@ -31,12 +30,13 @@ class ProfiledConnection:
     duckdb delta/total are shown as secondary context for table accumulation.
     """
 
-    def __init__(self, conn: DuckDBPyConnection) -> None:  # noqa: D107
+    def __init__(self, conn: DuckDBPyConnection, *, debug: bool = False) -> None:  # noqa: D107
         self._conn = conn
+        self._debug = debug
 
     def execute(self, query: str, parameters: list | None = None):  # noqa: ANN201
         """Log wall-clock time, RSS peak, and duckdb delta/total, then forward."""
-        if not debug:
+        if not self._debug:
             return (
                 self._conn.execute(query, parameters)
                 if parameters is not None
@@ -91,7 +91,7 @@ class ProfiledConnection:
 
 
 @contextlib.contextmanager
-def log_file(name: str) -> Iterator[None]:
+def log_file(name: str, tmp_dir: Path) -> Iterator[None]:
     """Tee root logger to tmp/{name}.log for every run."""
     tmp_dir.mkdir(exist_ok=True, parents=True)
     handler = FileHandler(tmp_dir / f"{name}.log", mode="w")
@@ -105,89 +105,25 @@ def log_file(name: str) -> Iterator[None]:
         handler.close()
 
 
-def get_connection(name: str) -> ProfiledConnection:
+def get_connection(
+    name: str,
+    tmp_dir: Path,
+    *,
+    threads: int | None = None,
+    debug: bool = False,
+) -> ProfiledConnection:
     """Create a file-backed DuckDB connection with spatial loaded."""
     conn = duckdb_connect(str(tmp_dir / f"{name}.duckdb"))
     conn.execute("LOAD spatial")
     conn.execute("SET enable_progress_bar = false")
     conn.execute("SET geometry_always_xy = true")
     conn.execute("SET preserve_insertion_order = false")
-    if num_threads is not None:
-        conn.execute(f"SET threads = {num_threads}")
-    return ProfiledConnection(conn)
+    if threads is not None:
+        conn.execute(f"SET threads = {threads}")
+    return ProfiledConnection(conn, debug=debug)
 
 
-def has_coverage_violations(conn: DuckDBPyConnection, table: str) -> bool:
-    """Return True if `table.geom` has any overlaps or unmatched shared edges."""
-    return conn.execute(f"""--sql
-        SELECT ST_CoverageInvalidEdges_Agg(geom) IS NOT NULL
-        FROM (SELECT UNNEST(ST_Dump(geom)).geom AS geom FROM "{table}")
-    """).fetchall()[0][0]
-
-
-def coverage_clean(
-    conn: DuckDBPyConnection,
-    table_in: str,
-    table_out: str,
-    fids: list[int] | None,
-    gap_max_width: float | None,
-) -> None:
-    """Write table_out from table_in with ST_CoverageClean applied to a subset (or all).
-
-    ``fids=None`` runs the clean over the entire table. ``gap_max_width``
-    enables the gap-merge parameter on the 3-arg overload; otherwise the
-    1-arg overload is used.
-
-    Mapping back to source rows: ST_CoverageClean returns a GeometryCollection
-    whose i-th element corresponds to input i. ST_Dump recursively unnests
-    sub-polygons of MultiPolygon elements, so we group by ``path[1]`` (the
-    top-level index) and re-aggregate. A group of size 1 keeps the original
-    Polygon type; a group of size >1 (MultiPolygon input/output) is re-wrapped
-    via ST_Collect.
-    """
-    where = "" if fids is None else f"WHERE fid IN ({','.join(str(f) for f in fids)})"
-    # snap_distance=-1 keeps GEOS's auto-detect default (which the 1-arg
-    # overload also uses); 0.0 would explicitly disable snapping and produce
-    # different output than the prior ctypes path that left the param unset.
-    cc = (
-        "ST_CoverageClean(list(geom ORDER BY fid))"
-        if gap_max_width is None
-        else f"ST_CoverageClean(list(geom ORDER BY fid), -1.0, {gap_max_width})"
-    )
-    conn.execute(f"""--sql
-        CREATE OR REPLACE TABLE "{table_out}" AS
-        WITH ord AS (
-            SELECT fid, row_number() OVER (ORDER BY fid) AS rn
-            FROM "{table_in}" {where}
-        ),
-        coll AS (
-            SELECT {cc} AS g FROM "{table_in}" {where}
-        ),
-        dumped AS (
-            SELECT (d).path[1] AS rn, (d).geom AS sub
-            FROM (SELECT UNNEST(ST_Dump(g)) AS d FROM coll)
-        ),
-        grouped AS (
-            SELECT rn, list(sub) AS subs FROM dumped GROUP BY rn
-        ),
-        parts AS (
-            SELECT rn,
-                   CASE WHEN len(subs) = 1 THEN subs[1] ELSE ST_Collect(subs) END
-                       AS cleaned_geom
-            FROM grouped
-        ),
-        mapping AS (
-            SELECT ord.fid, parts.cleaned_geom
-            FROM ord JOIN parts USING (rn)
-        )
-        SELECT t.* EXCLUDE (geom),
-               COALESCE(m.cleaned_geom, t.geom) AS geom
-        FROM "{table_in}" t
-        LEFT JOIN mapping m USING (fid)
-    """)
-
-
-def cleanup_tmp(name: str, *, parquet: bool = False) -> None:
+def cleanup_tmp(name: str, tmp_dir: Path, *, parquet: bool = False) -> None:
     """Remove tmp files for a named pipeline run."""
     for p in tmp_dir.glob(f"{name}.duckdb*"):
         p.unlink(missing_ok=True)
@@ -196,7 +132,9 @@ def cleanup_tmp(name: str, *, parquet: bool = False) -> None:
             p.unlink(missing_ok=True)
 
 
-def export_debug_tables(conn: DuckDBPyConnection, only: set[str] | None = None) -> None:
+def export_debug_tables(
+    conn: DuckDBPyConnection, tmp_dir: Path, only: set[str] | None = None
+) -> None:
     """Export pipeline tables to Parquet files for inspection."""
     tmp_dir.mkdir(parents=True, exist_ok=True)
     tables = conn.execute(

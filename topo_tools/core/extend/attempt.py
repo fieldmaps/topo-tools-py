@@ -8,21 +8,21 @@ from duckdb import Error as DuckDBError
 
 from . import _03_points as points
 from . import _04_voronoi as voronoi
-from .config import (
+from ._constants import (
     BASELINE_OVERHEAD_MB,
     BYTES_PER_POINT,
     DEFAULT_DISTANCE,
     MAX_POINTS,
     REMERGE_BYTES_PER_RAW_SEGMENT,
     SAFETY_MARGIN,
-    debug,
-    memory_gb,
 )
 
 logger = getLogger(__name__)
 
 
-def main(conn: DuckDBPyConnection, name: str) -> None:
+def main(
+    conn: DuckDBPyConnection, name: str, *, memory_gb: float, debug: bool = False
+) -> None:
     """Try to generate Voronoi polygons with multiple distance thresholds.
 
     The starting distance is derived per-file rather than always using
@@ -95,12 +95,12 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
     try:
         for d in [effective_distance * 2**i for i in range(10)]:
             try:
-                points.main(conn, name, d)
+                points.main(conn, name, d, debug=debug)
                 count = conn.execute(f'SELECT count(*) FROM "{name}_03b"').fetchall()[
                     0
                 ][0]
                 _check_point_count(count)
-                voronoi.main(conn, name)
+                voronoi.main(conn, name, debug=debug)
             except (RuntimeError, DuckDBError) as e:
                 logger.warning("fail: %s distance=%s: %s", name, d, e)
             else:

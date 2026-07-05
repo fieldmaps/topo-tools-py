@@ -5,25 +5,26 @@ from pathlib import Path
 
 from duckdb import DuckDBPyConnection
 
-from .config import COPY_OPTS, debug, output_dir, output_file
-from .utils import has_coverage_violations
+from ._constants import COPY_OPTS
+from ._coverage import has_coverage_violations
 
 logger = getLogger(__name__)
 
 
-def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
-    """Output results to path."""
+def main(
+    conn: DuckDBPyConnection, name: str, dest: Path, *, debug: bool = False
+) -> None:
+    """Output results to dest."""
     _check_overlaps(conn, f"{name}_05")
     _check_gaps(conn, f"{name}_05")
 
-    dest = output_file or output_dir / path.name
     dest.parent.mkdir(exist_ok=True, parents=True)
 
     conn.execute(f"""--sql
         COPY (
             SELECT * EXCLUDE (fid) RENAME (geom AS geometry)
             FROM "{name}_05"
-        ) TO '{dest}' {COPY_OPTS[path.suffix]}
+        ) TO '{dest}' {COPY_OPTS[dest.suffix]}
     """)
 
     if not debug:

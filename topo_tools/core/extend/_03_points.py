@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from duckdb import DuckDBPyConnection
 
-from app.config import MAX_POINTS_PER_SEGMENT, SNAP_TOLERANCE, debug
+from ._constants import MAX_POINTS_PER_SEGMENT, SNAP_TOLERANCE
 
 
 def build_segments(conn: DuckDBPyConnection, name: str) -> None:
@@ -52,7 +52,9 @@ def build_segments(conn: DuckDBPyConnection, name: str) -> None:
     """)
 
 
-def main(conn: DuckDBPyConnection, name: str, distance: Decimal) -> None:
+def main(
+    conn: DuckDBPyConnection, name: str, distance: Decimal, *, debug: bool = False
+) -> None:
     """Create points along boundary lines.
 
     Assumes build_segments has already created "{name}_03_tmp1".
