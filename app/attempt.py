@@ -9,11 +9,11 @@ from duckdb import Error as DuckDBError
 from . import _03_points as points
 from . import _04_voronoi as voronoi
 from .config import (
-    _BASELINE_OVERHEAD_MB,
-    _BYTES_PER_POINT,
-    _REMERGE_BYTES_PER_RAW_SEGMENT,
-    _SAFETY_MARGIN,
+    BASELINE_OVERHEAD_MB,
+    BYTES_PER_POINT,
     MAX_POINTS,
+    REMERGE_BYTES_PER_RAW_SEGMENT,
+    SAFETY_MARGIN,
     debug,
     distance,
     memory_gb,
@@ -58,10 +58,8 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
             "distance-calc: %s no real segments, using default=%s", name, distance
         )
     else:
-        remerge_floor_mb = (
-            raw_segment_count * _REMERGE_BYTES_PER_RAW_SEGMENT / 1_000_000
-        )
-        usable_mb = memory_gb * 1024 - _BASELINE_OVERHEAD_MB - remerge_floor_mb
+        remerge_floor_mb = raw_segment_count * REMERGE_BYTES_PER_RAW_SEGMENT / 1_000_000
+        usable_mb = memory_gb * 1024 - BASELINE_OVERHEAD_MB - remerge_floor_mb
         if usable_mb <= 0:
             logger.warning(
                 "%s: %s raw boundary segments need ~%.0fMB to decompose and "
@@ -77,7 +75,7 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
             effective_distance = Decimal(str(float(distance)))
         else:
             target_point_budget = int(
-                usable_mb * _SAFETY_MARGIN * 1_000_000 / _BYTES_PER_POINT
+                usable_mb * SAFETY_MARGIN * 1_000_000 / BYTES_PER_POINT
             )
             budget_floor = total_length / target_point_budget
             candidate = min(float(distance), natural_res)

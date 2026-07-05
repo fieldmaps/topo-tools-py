@@ -13,6 +13,13 @@ that segment's raw length. Confirmed: Chad's `ST_VoronoiDiagram` step
 to share Chad's mechanism) confirmed and fixed the same way; full pipeline →
 ~30s. Chile, Indonesia, and Philippines all confirmed unaffected/working.
 
+`100` was chosen as the smallest of several tested values — `ST_VoronoiDiagram`
+time on `tcd_admin2.parquet` scales worse than linearly with this constant
+(100→1s, 250→3.9s, 500→7.7s, 1000→13.9s, 2000→32.1s), so lower is strictly
+better, with zero measured downside on files that don't hit the cap at all
+(`chl`/`idn`/`phl_admin3` are byte-for-byte unaffected, since none of their
+real segments exceed the cap threshold).
+
 `app/attempt.py` additionally now computes a per-file starting `DISTANCE`:
 `effective_distance = MAX(MIN(DISTANCE, natural_res), total_exterior_length /
 target_point_budget)`. `natural_res` (median real segment length) lets files
@@ -55,8 +62,11 @@ DISTANCE-dependent term, fitted from probes run inside the real container:
    `chl_admin3` 3.23M segments → 2544MB (~787 B/segment, used as the
    constant). `phl_admin3` (13.07M segments) OOM'd on this step alone,
    confirming no DISTANCE value can rescue a file whose raw vertex count
-   alone exceeds the budget — `attempt.py` now fails fast on this case
-   instead of wasting 10 pointless retries.
+   alone exceeds the budget — `attempt.py` now logs a warning and falls back
+   to the plain default distance in this case instead of computing a
+   budget-derived one that would be nonsensical, since `--memory-gb` is a
+   soft target, not a hard limit (see "Two more bottlenecks" below for why
+   this isn't a hard block).
 2. **Fixed app/DuckDB startup overhead** (`_BASELINE_OVERHEAD_MB = 500`).
 3. **Final point cost** (`_BYTES_PER_POINT`, `_SAFETY_MARGIN`) — the
    DISTANCE-dependent `ST_VoronoiDiagram` → join → union sequence, fitted at
