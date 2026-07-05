@@ -150,9 +150,12 @@ picks up mid-investigation into *why*.
 ## Already fixed and committed (not part of this investigation)
 Commit `4047ae7` on `duckdb-migration`: `app/__main__.py` now isolates each file in
 `input_dir` into its own subprocess (`_run_isolated`) instead of looping in one
-process — fixes unbounded RSS growth (~2GB → ~19.85GB observed) across a multi-file
-batch. Documented in `CLAUDE.md` under "Batch Processing Many Files". This is done;
-don't re-investigate memory accumulation, that thread is closed.
+process — fixed unbounded RSS growth (~2GB → ~19.85GB observed) across a multi-file
+batch. That subprocess-isolation/batch-mode machinery was later removed entirely
+when the CLI dropped multi-file support in favor of single-file-only processing
+(each invocation now handles exactly one file, so there's nothing left to isolate
+between). This section remains as investigation history — don't re-investigate
+memory accumulation, that thread is closed.
 
 ## Outlier durations from the full clean run (subprocess-isolated, trustworthy)
 | file | duration | features | exterior boundary (deg) |

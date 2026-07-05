@@ -56,10 +56,7 @@ def extend(  # noqa: C901, PLR0912, PLR0913, PLR0915
 ) -> None:
     """Extend polygon boundaries outward with Voronoi diagrams to fill coverage gaps.
 
-    Processes exactly one file per call. Batch processing many files in one
-    process is a CLI-only concern (see topo_tools.cli) — GEOS's native heap
-    isn't reliably reclaimed between files, so this function intentionally
-    does not loop.
+    Processes exactly one file per call.
     """
     if step is not None and step not in _STEP_ORDER:
         msg = f"step must be one of {_STEP_ORDER}, got {step!r}"

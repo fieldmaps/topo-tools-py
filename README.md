@@ -41,20 +41,12 @@ Or, without installing, via `python -m`:
 python -m topo_tools extend --input-file=example.geojson --output-file=example.geojson
 ```
 
-To process an entire directory of files:
-
-```sh
-topo-tools extend --input-dir=inputs --output-dir=outputs
-```
-
 The following options are available:
 
 | Name            | Description                                                                |
 | --------------- | -------------------------------------------------------------------------- |
-| `--input-dir`   | input directory (for multiple files)                                       |
-| `--input-file`  | input file (for single files)                                              |
-| `--output-dir`  | output directory (for multiple files)                                      |
-| `--output-file` | output file (for single files)                                             |
+| `--input-file`  | input file                                                                  |
+| `--output-file` | output file                                                                 |
 | `--memory-gb`   | available memory in GB, used to size point density automatically (default: `4`) |
 | `--threads`     | DuckDB thread count (default: DuckDB's own default, typically the number of CPU cores) |
 | `--overwrite`   | whether to overwrite existing files (default: `no`)                        |

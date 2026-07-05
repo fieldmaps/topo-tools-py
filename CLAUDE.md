@@ -48,8 +48,7 @@ Memory efficiency is a first-class concern. Prefer approaches that minimize inte
 # Install dependencies
 uv sync
 
-# Run the extend tool (--input-file is joined onto input_dir, so pass filename or absolute path;
-# --overwrite needed when outputs/<name> already exists regardless of --output-file target)
+# Run the extend tool (processes exactly one file per call)
 uv run topo-tools extend --input-file=... --output-file=...
 # equivalently: uv run python -m topo_tools extend ...
 
@@ -58,32 +57,6 @@ uv run ruff format && uv run ruff check
 ```
 
 Pre-commit hooks run `uv-sync`, `ruff-format`, and `ruff-check` automatically.
-
-## Batch Processing Many Files
-
-Multi-file runs (`topo-tools extend` over a whole `input_dir`) isolate each file in
-its own subprocess (`topo_tools.cli.main._run_isolated`, dispatching
-`python -m topo_tools extend --input-file=X` per file) rather than looping over
-files inside one long-lived process. This was a
-deliberate fix, not the original design: looping in-process let RSS grow unbounded
-across files — confirmed empirically at ~2GB after a few files up to 19.85GB after
-~25 minutes / ~10 files, exceeding the machine's physical RAM and forcing heavy swap,
-even though every individual file peaked under 3GB when profiled in isolation.
-`conn.close()` per file did not prevent this: GEOS's native heap (used by
-`ST_VoronoiDiagram`, `ST_Union_Agg`, coverage-clean) allocates outside DuckDB's own
-buffer-pool tracking, so it wasn't guaranteed to be returned to the OS between files
-even with each file's DuckDB connection properly closed. Don't revert to an in-process
-loop over `input_dir` — that reintroduces the leak. `--threads` count is unrelated to
-this mechanism — it affects per-query peak, not cross-file retention.
-
-`--input-file` single-file invocations (the subprocess's own recursive base case)
-still run in-process directly — there's nothing to isolate for a single file.
-
-Reminder when scripting this: `--input-file` is joined onto `input_dir` unless
-absolute, so pass the bare filename (`mex_admin2_v02.parquet`), not a path that
-already includes the `inputs/` prefix (e.g. from a `inputs/*.parquet` glob) — that
-double-joins to a nonexistent path, and the pipeline silently no-ops (no error, no
-output) rather than failing loudly.
 
 ## Architecture
 
@@ -96,9 +69,9 @@ tables are the IPC mechanism between stages. Three layers, each with a specific 
 - `topo_tools/core/extend/` — the real stage implementations. No `click` import.
 - `topo_tools/api/extend.py` — the public `extend()` function; chains all stages
   together for exactly one file per call. No `click` import.
-- `topo_tools/cli/main.py` — the click CLI; owns the directory for-loop over input
-  files and the per-file subprocess isolation (see below), calling `api.extend()`
-  for each file. The only layer allowed to import `click`.
+- `topo_tools/cli/main.py` — the click CLI; maps flags/env vars onto a single
+  `api.extend()` call. Processes exactly one file per invocation — no directory
+  batching. The only layer allowed to import `click`.
 
 ### Pipeline Stages
 
@@ -121,15 +94,15 @@ as a side effect of importing). Settings now flow in two ways:
   `memory_gb` + `debug`; `_06_outputs` needs `debug`; `get_connection` needs
   `threads` + `debug`). `topo_tools/cli/main.py`'s `extend` command maps CLI
   flags/env vars 1:1 onto these kwargs (env var names match the old `config.py`
-  ones — `INPUT_DIR`, `MEMORY_GB`, `DEBUG`, etc. — via click's `envvar=`).
+  ones — `INPUT_FILE`, `MEMORY_GB`, `DEBUG`, etc. — via click's `envvar=`).
 - **Not user-configurable, pure literals** — `topo_tools/core/extend/_constants.py`
-  (`FORMATS`, `MAX_POINTS`, `SNAP_TOLERANCE`, `DEFAULT_DISTANCE`,
+  (`MAX_POINTS`, `SNAP_TOLERANCE`, `DEFAULT_DISTANCE`,
   `MAX_POINTS_PER_SEGMENT`, the memory-model constants, `COPY_OPTS`). Safe to import
   at module load — no argparse, no env reads.
 
 | Setting                    | Description                                                         |
 | -------------------------- | ------------------------------------------------------------------- |
-| `input_dir` / `output_dir` | I/O directories (for directory-batch CLI runs)                      |
+| `input_path` / `output_path` | Input/output file paths (one file per call)                       |
 | `tmp_dir`                  | Intermediate DuckDB + Parquet location; defaults to a fresh `tempfile.mkdtemp()` when unset, cleaned up after the call unless `debug` |
 | `threads`                  | DuckDB thread count; unset defers to DuckDB default                 |
 | `memory_gb`                | Available memory in GB; derives attempt.py's per-file resampling distance/point budget (see `docs/voronoi-memory.md`) — set to the real container/deployment limit |

@@ -2,8 +2,6 @@
 
 from decimal import Decimal
 
-FORMATS = [".shp", ".geojson", ".parquet", ".gpkg"]
-
 MAX_POINTS = 10_000_000
 SNAP_TOLERANCE = 0.00000001
 # Not user-configurable: attempt.py derives a per-file effective_distance from
