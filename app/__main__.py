@@ -19,6 +19,7 @@ from .config import (
     distance,
     input_dir,
     input_file,
+    memory_gb,
     num_threads,
     output_dir,
     overwrite,
@@ -40,7 +41,17 @@ _STEPS = {
 _STEP_TABLES = {
     "inputs": ["{n}_01"],
     "lines": ["{n}_02"],
-    "attempt": ["{n}_03a", "{n}_03b", "{n}_04", "{n}_04_tmp1", "{n}_04_tmp2"],
+    "attempt": [
+        "{n}_03a",
+        "{n}_03_tmp1",
+        "{n}_03_tmp2",
+        "{n}_03_tmp3",
+        "{n}_03_tmp4",
+        "{n}_03b",
+        "{n}_04",
+        "{n}_04_tmp1",
+        "{n}_04_tmp2",
+    ],
     "merge": ["{n}_05", "{n}_05_tmp1", "{n}_05_tmp2", "{n}_05_tmp3"],
     "outputs": [],
 }
@@ -79,6 +90,7 @@ def _run_isolated(path: Path) -> None:
         f"--output-dir={output_dir}",
         f"--tmp-dir={tmp_dir}",
         f"--distance={distance}",
+        f"--memory-gb={memory_gb}",
     ]
     if num_threads is not None:
         args.append(f"--threads={num_threads}")
