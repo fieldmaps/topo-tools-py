@@ -55,6 +55,31 @@ docker run -v .:/srv ghcr.io/fieldmaps/edge-extender --input-file=example.geojso
 
 Pre-commit hooks run `uv-sync`, `ruff-format`, and `ruff-check` automatically.
 
+## Batch Processing Many Files
+
+Multi-file runs (`uv run -m app` over a whole `input_dir`) isolate each file in its
+own subprocess (`__main__._run_isolated`, dispatching `uv run -m app --input-file=X`
+per file) rather than looping over files inside one long-lived process. This was a
+deliberate fix, not the original design: looping in-process let RSS grow unbounded
+across files — confirmed empirically at ~2GB after a few files up to 19.85GB after
+~25 minutes / ~10 files, exceeding the machine's physical RAM and forcing heavy swap,
+even though every individual file peaked under 3GB when profiled in isolation.
+`conn.close()` per file did not prevent this: GEOS's native heap (used by
+`ST_VoronoiDiagram`, `ST_Union_Agg`, coverage-clean) allocates outside DuckDB's own
+buffer-pool tracking, so it wasn't guaranteed to be returned to the OS between files
+even with each file's DuckDB connection properly closed. Don't revert to an in-process
+loop over `input_dir` — that reintroduces the leak. `--threads` count is unrelated to
+this mechanism — it affects per-query peak, not cross-file retention.
+
+`--input-file` single-file invocations (the subprocess's own recursive base case)
+still run in-process directly — there's nothing to isolate for a single file.
+
+Reminder when scripting this: `--input-file` is joined onto `input_dir` unless
+absolute, so pass the bare filename (`mex_admin2_v02.parquet`), not a path that
+already includes the `inputs/` prefix (e.g. from a `inputs/*.parquet` glob) — that
+double-joins to a nonexistent path, and the pipeline silently no-ops (no error, no
+output) rather than failing loudly.
+
 ## Architecture
 
 The pipeline has 5 sequential stages, each a standalone module in `app/`. All stages share a single file-backed DuckDB connection; tables are the IPC mechanism between stages. `__main__.py` chains all stages together in a sequential for-loop over input files.

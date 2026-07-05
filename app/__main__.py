@@ -1,8 +1,10 @@
 """Entry point for edge-extender, discovers inputs and runs the pipeline."""
 
 import signal
+import sys
 from logging import getLogger
 from pathlib import Path
+from subprocess import run as run_subprocess
 from types import FrameType
 from typing import Never
 
@@ -17,6 +19,7 @@ from .config import (
     distance,
     input_dir,
     input_file,
+    num_threads,
     output_dir,
     overwrite,
     step,
@@ -46,12 +49,48 @@ _STEP_TABLES = {
 def main() -> None:
     """Run main function."""
     logger.info("--distance=%s --debug=%s", distance, debug)
-    files = [input_file] if input_file else sorted(input_dir.iterdir())
-    for path in files:
+    if input_file:
+        # Single-file invocation: the recursive base case, run in this process.
+        _run_file(input_file)
+        return
+    for path in sorted(input_dir.iterdir()):
         if not overwrite and (output_dir / path.name).exists():
             continue
         if path.is_file() and path.suffix in FORMATS:
-            _run_file(path)
+            _run_isolated(path)
+
+
+def _run_isolated(path: Path) -> None:
+    """Run one file in a fresh subprocess so its memory is fully reclaimed on exit.
+
+    GEOS's native heap (used by ST_VoronoiDiagram, ST_Union_Agg, coverage-clean)
+    allocates outside DuckDB's own buffer-pool tracking, so RSS is not guaranteed
+    to return to the OS between files within one long-lived process even when each
+    file's DuckDB connection is properly closed — confirmed empirically to reach
+    ~20GB over a batch of files that each peak under 3GB in isolation. Shelling out
+    per file sidesteps this regardless of which allocator is actually retaining it.
+    """
+    args = [
+        sys.executable,
+        "-m",
+        "app",
+        f"--input-file={path.name}",
+        f"--input-dir={input_dir}",
+        f"--output-dir={output_dir}",
+        f"--tmp-dir={tmp_dir}",
+        f"--distance={distance}",
+    ]
+    if num_threads is not None:
+        args.append(f"--threads={num_threads}")
+    if overwrite:
+        args.append("--overwrite")
+    if debug:
+        args.append("--debug")
+    if step:
+        args.append(f"--step={step}")
+    result = run_subprocess(args, check=False)
+    if result.returncode != 0:
+        logger.error("subprocess failed: %s (exit %s)", path.name, result.returncode)
 
 
 def _run_file(path: Path) -> None:
