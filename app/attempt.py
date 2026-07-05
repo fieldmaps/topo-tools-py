@@ -37,12 +37,12 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
 
     Before any of that, raw_segment_count-driven memory (decomposing "{name}_02"
     into real segments, then remerging the normal ones per fid) is checked
-    against memory_gb directly: this cost is DISTANCE-independent, so no
-    amount of doubling DISTANCE in the retry loop below can rescue a file
-    whose raw vertex count alone already exceeds the budget (confirmed on
-    phl_admin3.parquet: OOM'd inside a real 4GB container decomposing 13M
-    real segments, before DISTANCE was ever applied) — fail fast instead of
-    wasting 10 retries and, for files big enough, a real memory-limit crash.
+    against memory_gb: this cost is DISTANCE-independent, so no amount of
+    doubling DISTANCE in the retry loop below can rescue a file whose raw
+    vertex count alone already exceeds the budget. --memory-gb is a soft
+    target, not a hard limit — the real deployment may have swap headroom
+    beyond it — so this only logs a warning and falls back to the plain
+    default distance; it never refuses to attempt.
 
     If the effective distance still fails or produces too many points, repeat
     by doubling it up to 10 times, same fallback as before.
@@ -63,35 +63,38 @@ def main(conn: DuckDBPyConnection, name: str) -> None:
         )
         usable_mb = memory_gb * 1024 - _BASELINE_OVERHEAD_MB - remerge_floor_mb
         if usable_mb <= 0:
-            msg = (
-                f"{name}: {raw_segment_count:,} raw boundary segments need "
-                f"~{remerge_floor_mb:.0f}MB to decompose and remerge alone, "
-                f"which already exceeds the ~{memory_gb * 1024:.0f}MB budget "
-                f"(--memory-gb={memory_gb}) before any DISTANCE is applied — "
-                "no DISTANCE value can fix this, so not attempting"
+            logger.warning(
+                "%s: %s raw boundary segments need ~%.0fMB to decompose and "
+                "remerge alone, exceeding the ~%.0fMB budget (--memory-gb=%s) "
+                "before any DISTANCE is applied — attempting anyway with the "
+                "default distance since --memory-gb is a soft target",
+                name,
+                f"{raw_segment_count:,}",
+                remerge_floor_mb,
+                memory_gb * 1024,
+                memory_gb,
             )
-            logger.error(msg)
-            raise RuntimeError(msg)
-
-        target_point_budget = int(
-            usable_mb * _SAFETY_MARGIN * 1_000_000 / _BYTES_PER_POINT
-        )
-        budget_floor = total_length / target_point_budget
-        candidate = min(float(distance), natural_res)
-        effective_distance = Decimal(str(max(candidate, budget_floor)))
-        logger.info(
-            "distance-calc: %s raw_segments=%s remerge_floor_mb=%.0f"
-            " target_point_budget=%s natural_res=%s total_length=%s"
-            " budget_floor=%s effective=%s",
-            name,
-            raw_segment_count,
-            remerge_floor_mb,
-            target_point_budget,
-            natural_res,
-            total_length,
-            budget_floor,
-            effective_distance,
-        )
+            effective_distance = Decimal(str(float(distance)))
+        else:
+            target_point_budget = int(
+                usable_mb * _SAFETY_MARGIN * 1_000_000 / _BYTES_PER_POINT
+            )
+            budget_floor = total_length / target_point_budget
+            candidate = min(float(distance), natural_res)
+            effective_distance = Decimal(str(max(candidate, budget_floor)))
+            logger.info(
+                "distance-calc: %s raw_segments=%s remerge_floor_mb=%.0f"
+                " target_point_budget=%s natural_res=%s total_length=%s"
+                " budget_floor=%s effective=%s",
+                name,
+                raw_segment_count,
+                remerge_floor_mb,
+                target_point_budget,
+                natural_res,
+                total_length,
+                budget_floor,
+                effective_distance,
+            )
 
     try:
         for d in [effective_distance * 2**i for i in range(10)]:

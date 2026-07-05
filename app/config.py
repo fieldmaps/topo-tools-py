@@ -94,9 +94,12 @@ MAX_POINTS_PER_SEGMENT = 100
 #     OOM during remerge (confirmed real kernel SIGKILL via `docker inspect
 #     .State.OOMKilled`, not a catchable DuckDBError) — i.e. this cost alone
 #     already exceeds 4GB before DISTANCE is ever applied, for a file with
-#     enough raw vertices. No DISTANCE value fixes this; attempt.py must
-#     detect and fail fast on it instead of doubling DISTANCE 10 times
-#     pointlessly (doubling never reduces raw vertex count).
+#     enough raw vertices. No DISTANCE value fixes this — doubling DISTANCE
+#     in the retry loop never reduces raw vertex count — so attempt.py warns
+#     and falls back to the plain default distance instead of computing a
+#     budget-derived one that would be nonsensical here; --memory-gb is a
+#     soft target, not a hard limit (the real deployment may have swap
+#     headroom beyond it), so this never blocks the attempt outright.
 _REMERGE_BYTES_PER_RAW_SEGMENT = 850  # rounded up from Chile's 787 B/segment
 
 # Final point cost (DISTANCE-dependent — the ST_VoronoiDiagram -> join ->

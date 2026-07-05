@@ -69,19 +69,65 @@ limit. Verified in the real 4GB container after the fix: Chad/Algeria
 unaffected, **Chile now succeeds** (previously OOM'd even at the old
 "calibrated" default).
 
-**Not yet fixed — two separate, pre-existing bottlenecks found during this
-verification, out of scope for the DISTANCE-budget fix above:**
-- `idn_admin3` OOMs in `_02_lines.py`'s neighbor-union bbox self-join
-  (dies after `_02_tmp1`, before `_02_tmp2` completes) — a pre-existing
-  pattern this project has separately flagged before as capable of blowing
-  up on high-feature-count files, apparently never stress-tested under a
-  real hard memory ceiling until now.
-- `phl_admin3` OOMs even earlier, in `_01_inputs.py`'s `ST_CoverageClean`
-  pass (triggered by invalid-edge detection in the source data) — fails
-  before `lines` or `attempt.py` ever run.
+## Two more bottlenecks, investigated and documented (no runtime gate added)
 
-Both were likely masked on a dev machine by abundant RAM+swap rather than
-actually being safe. Needs separate investigation.
+Two more pre-existing, out-of-scope-at-the-time bottlenecks turned up while
+verifying the fix above under a real container. Both are DISTANCE-independent
+(no resampling lever shrinks either) — but unlike `_03_points.py`'s raw-vertex
+floor (which sits inside `attempt.py`'s retry loop and needs to pick a sane
+fallback DISTANCE to avoid a nonsensical calculation), these two run in
+`_01_inputs.py`/`_02_lines.py`, which have no DISTANCE at all to fall back to.
+A runtime memory-budget check was built for both, then deliberately removed:
+`--memory-gb` is meant as a soft target for `attempt.py`'s DISTANCE
+selection, not a hard gate on whether *any* file is even attempted — a real
+deployment may have swap headroom beyond the stated `--memory-gb`, and once
+the check no longer blocked (see below), it had zero effect on execution
+besides one log line, at the cost of two probe-fitted constants that would
+need future upkeep. Findings are recorded here instead so a future OOM on
+one of these files points back to a known, already-diagnosed cause.
+
+**Docker Desktop VM memory cap gotcha, discovered mid-investigation.** Every
+container test in this whole document up to this point was silently running
+under Docker Desktop's VM total memory (`docker info` → `Total Memory`), not
+the `--memory` flag passed to `docker run` — the flag can only ever be a
+ceiling *within* whatever the VM itself has. The VM had drifted to ~3.83GB
+(Docker Desktop's settings file already said 12GB; it just wasn't running
+with that config — a restart picked it up with no file edits needed). This
+had been silently under-testing every `--memory=4g` container in this
+investigation by ~200MB, and it fully invalidated the first `idn_admin3`
+"OOM" finding below — see that entry for what changed once corrected.
+**Always check `docker info`'s `Total Memory` against the `--memory` flag
+you're actually passing before trusting a container test.**
+
+- **`phl_admin3` OOMs in `_01_inputs.py`'s `ST_CoverageClean` pass**
+  (triggered by invalid-edge detection in the source data) — fails before
+  `lines` or `attempt.py` ever run. Measured via a standalone probe against
+  growing fractions of `phl_admin3`'s real 13.85M-vertex `_01` table, inside
+  a real container: `peak_MB ≈ 499 + 395 × vertices_millions` (fitted over 5
+  points spanning 10–100% of the real file, so this is interpolation, not
+  extrapolation) — i.e. this file alone needs ~5.9GB, genuinely over a 4GB
+  ceiling, with no DISTANCE-style lever able to shrink it.
+- **`idn_admin3` in `_02_lines.py`'s neighbor-union bbox self-join.** The
+  *first* pass at this (exploding into per-part bboxes to tighten the join,
+  mirroring `_05_merge.py`'s `_05_tmp1` pattern) looked like the obvious fix
+  and helped Indonesia, but **badly regressed Chile** — Chile has one
+  `admin3` fid made of 3,796 tightly-clustered island parts; exploding it
+  into per-part bboxes multiplies the self-join's row count far more than
+  the tighter bboxes save (Chile: 3.3GB peak with the original whole-fid
+  bbox vs. OOM at 10GB+ with per-part bboxes). Indonesia's own pathology is
+  the opposite shape — many fids, each with a *few* parts spread *far
+  apart* (one fid has 300 parts across a 2°×1.2° bbox) — so a whole-fid
+  bbox there matches far more false candidates than a tight per-part one
+  would. No single bbox granularity serves both shapes without materially
+  more complexity (e.g. per-fid spatial clustering of parts), which was
+  explicitly decided against — reverted to the original whole-fid bbox,
+  unchanged from `ce7fc0f` (proven safe for Chile, zero regression risk).
+  Once the Docker Desktop VM cap above was fixed, re-measurement showed
+  Indonesia's original code was never algorithmically broken — it just
+  genuinely needs ~5.4GB (`idn_admin3`: 7.48M vertices), confirmed via
+  `chl_admin3` (3.94M vertices → 3.57GB, fits) and `idn_admin3` (7.48M
+  vertices → 5.43GB, does not fit) directly bracketing the real 4GB
+  pass/fail boundary.
 
 The rest of this document is the original investigation history, kept for
 context on how the root cause was diagnosed.
