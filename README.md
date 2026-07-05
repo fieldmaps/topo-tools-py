@@ -37,9 +37,9 @@ The following options are available:
 | `--output-dir`  | output directory (for multiple files)                                      |
 | `--output-file` | output file (for single files)                                             |
 | `--memory-gb`   | available memory in GB, used to size point density automatically (default: `4`) |
-| `--num-threads` | number of layers to run at once. (default: `1` \* number of CPUs detected) |
+| `--threads`     | DuckDB thread count (default: DuckDB's own default, typically the number of CPU cores) |
 | `--overwrite`   | whether to overwrite existing files (default: `no`)                        |
-| `--quiet`       | Supress info and error messages (default: `no`)                            |
+| `--debug`       | keep intermediate tables, export them to Parquet, and log detailed timing/memory per query (default: `no`) |
 
 Polygons the size of small countries typically take a few seconds, with larger ones at full detail finish in about 10 min. Processing time is proportional to total perimeter length rather than area. The spacing between points on a line is chosen automatically per file, balancing the source data's own level of detail against `--memory-gb` — finer for naturally detailed boundaries, coarser only when needed to fit the memory budget.
 
