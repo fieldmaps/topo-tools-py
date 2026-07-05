@@ -73,7 +73,8 @@ Key thread-sensitivity breakdown:
 
 For memory-constrained deployments: `--threads=1` gives a similar peak (~7.2 GB) to
 default threads. Both are above a 4 GB WASM/Docker target — reducing below that requires
-pipeline changes (chunking or reduced point density via `--distance`).
+pipeline changes (chunking or a coarser `--memory-gb`-derived resampling distance, see
+`docs/voronoi-memory.md`).
 
 ---
 

@@ -16,7 +16,6 @@ from . import attempt
 from .config import (
     FORMATS,
     debug,
-    distance,
     input_dir,
     input_file,
     memory_gb,
@@ -59,7 +58,7 @@ _STEP_TABLES = {
 
 def main() -> None:
     """Run main function."""
-    logger.info("--distance=%s --debug=%s", distance, debug)
+    logger.info("--memory-gb=%s --debug=%s", memory_gb, debug)
     if input_file:
         # Single-file invocation: the recursive base case, run in this process.
         _run_file(input_file)
@@ -89,7 +88,6 @@ def _run_isolated(path: Path) -> None:
         f"--input-dir={input_dir}",
         f"--output-dir={output_dir}",
         f"--tmp-dir={tmp_dir}",
-        f"--distance={distance}",
         f"--memory-gb={memory_gb}",
     ]
     if num_threads is not None:

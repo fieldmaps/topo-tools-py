@@ -98,11 +98,10 @@ The pipeline has 5 sequential stages, each a standalone module in `app/`. All st
 
 | Setting                    | Default                    | Description                                                         |
 | -------------------------- | -------------------------- | ------------------------------------------------------------------- |
-| `DISTANCE`                 | `0.0002`                   | Point spacing in decimal degrees                                    |
 | `INPUT_DIR` / `OUTPUT_DIR` | `../inputs` / `../outputs` | I/O directories (relative to `app/`)                                |
 | `TMP_DIR`                  | `../tmp`                   | Intermediate DuckDB + Parquet location                              |
 | `THREADS`                  | (unset)                    | DuckDB thread count; unset defers to DuckDB default                 |
-| `MEMORY_GB`                | `4`                        | Available memory in GB; derives attempt.py's per-file DISTANCE point budget (see `docs/voronoi-memory.md`) — set to the real container/deployment limit |
+| `MEMORY_GB`                | `4`                        | Available memory in GB; derives attempt.py's per-file resampling distance/point budget (see `docs/voronoi-memory.md`) — set to the real container/deployment limit |
 | `OVERWRITE`                | `False`                    | Overwrite existing output                                           |
 | `DEBUG`                    | `False`                    | Keep intermediate tables, export all to Parquet, and log timing + memory delta per query |
 | `STEP`                     | (none)                     | Run only one named stage (inputs/lines/attempt/merge/outputs)       |
@@ -160,4 +159,4 @@ gh api "repos/duckdb/duckdb-spatial/contents/docs/functions.md?ref=${DUCKDB_REF}
 
 - `docs/topology.md` — topology approach (ST_Node + ST_Polygonize), DuckDB spatial function reference, SPATIAL_JOIN memory reservation bug
 - `docs/performance.md` — thread-scaling benchmarks, pipeline phase profiles, `get_connection` settings, RTREE experiment
-- `docs/voronoi-memory.md` — Voronoi collinearity degeneracy fix (segment cap, dynamic DISTANCE), `--memory-gb`-derived point budget fitted inside a real memory-limited Docker container, and two still-open OOM bottlenecks in `inputs.py`/`lines.py`
+- `docs/voronoi-memory.md` — Voronoi collinearity degeneracy fix (segment cap, dynamic resampling distance), `--memory-gb`-derived point budget fitted inside a real memory-limited Docker container, and two documented (not gated) memory ceilings in `inputs.py`/`lines.py` that genuinely exceed 4GB for large files (`phl_admin3`, `idn_admin3`)

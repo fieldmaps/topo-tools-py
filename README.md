@@ -36,12 +36,12 @@ The following options are available:
 | `--input-file`  | input file (for single files)                                              |
 | `--output-dir`  | output directory (for multiple files)                                      |
 | `--output-file` | output file (for single files)                                             |
-| `--distance`    | decimal degrees between points on a line (default: `0.0002`)               |
+| `--memory-gb`   | available memory in GB, used to size point density automatically (default: `4`) |
 | `--num-threads` | number of layers to run at once. (default: `1` \* number of CPUs detected) |
 | `--overwrite`   | whether to overwrite existing files (default: `no`)                        |
 | `--quiet`       | Supress info and error messages (default: `no`)                            |
 
-Polygons the size of small countries typically take a few seconds, with larger ones at full detail finish in about 10 min. Processing time is proportional to total perimeter length rather than area. The default distance of `0.0002` is sufficient to process most country boundaires. Use a larger value for the entire world, or a smaller value for neighbourhood boundaries.
+Polygons the size of small countries typically take a few seconds, with larger ones at full detail finish in about 10 min. Processing time is proportional to total perimeter length rather than area. The spacing between points on a line is chosen automatically per file, balancing the source data's own level of detail against `--memory-gb` — finer for naturally detailed boundaries, coarser only when needed to fit the memory budget.
 
 ## How it Works
 
@@ -58,7 +58,7 @@ The overall processing can be broken down into 4 distinct types of geometry tran
 | :--------------------------------------------------------------------------------: | :--------------------------------------------------------------------------------: |
 | ![](https://raw.githubusercontent.com/fieldmaps/edge-extender/main/img/tza_01.png) | ![](https://raw.githubusercontent.com/fieldmaps/edge-extender/main/img/tza_02.png) |
 
-**Line to Point:** Lines are converted to points using two methods. The first set of points are taken from all vertices that make up a line. However, for certain areas like winding rivers and deltas, this in an insufficient level of detail to properly center the resulting voronoi. With just vertices, the center lines would zigzag through gaps instead of going straight through them. Lines are therefore split up into segments based on a configurable distance, with points taken at the breaks between segments.
+**Line to Point:** Lines are converted to points using two methods. The first set of points are taken from all vertices that make up a line. However, for certain areas like winding rivers and deltas, this in an insufficient level of detail to properly center the resulting voronoi. With just vertices, the center lines would zigzag through gaps instead of going straight through them. Lines are therefore split up into segments based on an automatically-chosen distance, with points taken at the breaks between segments.
 
 |                                 Points along River                                 |                              Final Result along Delta                              |
 | :--------------------------------------------------------------------------------: | :--------------------------------------------------------------------------------: |

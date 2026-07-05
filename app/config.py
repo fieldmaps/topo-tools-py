@@ -31,7 +31,6 @@ parser.add_argument(
 )
 parser.add_argument("--output-file", default=getenv("OUTPUT_FILE"))
 parser.add_argument("--tmp-dir", default=getenv("TMP_DIR", str(cwd / "../tmp")))
-parser.add_argument("--distance", default=getenv("DISTANCE", "0.0002"))
 parser.add_argument("--threads", default=getenv("THREADS"))
 parser.add_argument("--memory-gb", default=getenv("MEMORY_GB", "4"))
 parser.add_argument("--overwrite", **_bool_flag("OVERWRITE"))
@@ -43,7 +42,6 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-distance = Decimal(args.distance)
 num_threads = int(args.threads) if args.threads is not None else None
 memory_gb = float(args.memory_gb)
 input_dir = Path(args.input_dir)
@@ -64,6 +62,16 @@ FORMATS = [".shp", ".geojson", ".parquet", ".gpkg"]
 
 MAX_POINTS = 10_000_000
 SNAP_TOLERANCE = 0.00000001
+# Not user-configurable: attempt.py derives a per-file effective_distance from
+# --memory-gb and each file's own natural_res, so this only serves as (a) the
+# floor for boundaries with no fine natural detail (min(DEFAULT_DISTANCE,
+# natural_res) — natural_res always wins when finer, so this can never
+# coarsen an already-detailed file) and (b) a fallback for two edge cases
+# (no real segments; memory floor already blown before any resampling). A
+# CLI/env override was removed: the only documented use case for a larger
+# value ("the entire world") didn't actually work, since natural_res already
+# wins over any coarser override wherever real detail exists.
+DEFAULT_DISTANCE = Decimal("0.0002")
 # Cap on points generated per real (untouched) line segment; bounds the size
 # of the largest exactly-collinear point cluster fed to ST_VoronoiDiagram,
 # independent of that segment's raw length. 100 was the smallest of several
