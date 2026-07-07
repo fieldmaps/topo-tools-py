@@ -18,9 +18,7 @@ example use cases.
 ## Requirements
 
 - Python 3.10+.
-- Network access on first run: DuckDB downloads the `spatial` extension on demand. Air-gapped or network-restricted environments need it pre-installed (see [DuckDB's extension docs](https://duckdb.org/docs/extensions/overview)).
-- No wheel is published for Alpine/musl (`python:*-alpine` images) or for glibc <2.26 (e.g. RHEL/CentOS 7, Amazon Linux 2) — these can't get a prebuilt `duckdb` wheel from PyPI. Use a glibc-based image (e.g. `python:3.x-slim`) instead.
-- `extend()`/`topo-tools extend` process exactly one file per call by design — loop over files from separate OS processes (a shell loop invoking the CLI, or `subprocess.run` per file from Python), not from within one long-running Python process. See [`docs/performance.md`](docs/performance.md#why-one-file-per-process) for why.
+- Network access on first run: DuckDB downloads the `spatial` extension on demand.
 
 ## Supported Formats
 
@@ -45,26 +43,31 @@ extend("example.geojson", "example_extended.geojson", memory_gb=4)
 Installing the package also installs a `topo-tools` command:
 
 ```sh
-topo-tools extend --input-file=example.geojson --output-file=example.geojson
+topo-tools extend example.geojson
 ```
 
-Or, without installing, via `python -m`:
+The following options cover the common case:
+
+| Name          | Description                                                                     |
+| ------------- | ------------------------------------------------------------------------------- |
+| `INPUT_FILE`  | Input file. **Required.**                                                       |
+| `OUTPUT_FILE` | Output file. Optional -- defaults to `INPUT_FILE` with an `_extended` suffix.   |
+| `--memory-gb` | Available memory in GB, used to size point density automatically (default: `4`) |
+| `--overwrite` | Overwrite an existing output file (default: `no`)                               |
+
+Run `topo-tools extend --help` for the full list, including thread count, debug tracing, and running a single pipeline stage.
+
+### Examples
 
 ```sh
-python -m topo_tools extend --input-file=example.geojson --output-file=example.geojson
+# Basic run, output name chosen automatically (example.geojson -> example_extended.geojson)
+topo-tools extend example.geojson
+
+# Explicit output, sized for a 2GB container
+topo-tools extend example.gpkg example_extended.gpkg --memory-gb 2
+
+# Rerun and overwrite a previous output
+topo-tools extend example.parquet example_extended.parquet --overwrite
 ```
-
-The following options are available. Each also has an environment variable equivalent (useful in containers where flags are awkward to pass):
-
-| Name            | Env Var       | Description                                                                                                        |
-| --------------- | ------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `--input-file`  | `INPUT_FILE`  | Input file. **Required.**                                                                                          |
-| `--output-file` | `OUTPUT_FILE` | Output file. **Required.**                                                                                         |
-| `--memory-gb`   | `MEMORY_GB`   | Available memory in GB, used to size point density automatically (default: `4`)                                    |
-| `--threads`     | `THREADS`     | DuckDB thread count (default: DuckDB's own default, typically the number of CPU cores)                             |
-| `--overwrite`   | `OVERWRITE`   | Overwrite an existing output file (default: `no`)                                                                  |
-| `--debug`       | `DEBUG`       | Keep intermediate tables, export them to Parquet, and log detailed timing/memory per query (default: `no`)         |
-| `--tmp-dir`     | `TMP_DIR`     | Intermediate DuckDB + Parquet location (default: a fresh temp dir per run, removed after unless `--debug`)         |
-| `--step`        | `STEP`        | Run only one pipeline stage — `inputs`, `lines`, `attempt`, `merge`, or `outputs` (default: run the full pipeline) |
 
 Polygons the size of small countries typically take a few seconds, with larger ones at full detail finish in about 10 min. Processing time is proportional to total perimeter length rather than area. The spacing between points on a line is chosen automatically per file, balancing the source data's own level of detail against `--memory-gb` — finer for naturally detailed boundaries, coarser only when needed to fit the memory budget.

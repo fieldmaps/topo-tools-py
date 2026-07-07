@@ -45,7 +45,7 @@ _STEP_TABLES = {
 
 def extend(  # noqa: C901, PLR0912, PLR0913, PLR0915
     input_path: str | Path,
-    output_path: str | Path,
+    output_path: str | Path | None = None,
     *,
     memory_gb: float = 4.0,
     threads: int | None = None,
@@ -56,14 +56,19 @@ def extend(  # noqa: C901, PLR0912, PLR0913, PLR0915
 ) -> None:
     """Extend polygon boundaries outward with Voronoi diagrams to fill coverage gaps.
 
-    Processes exactly one file per call.
+    Processes exactly one file per call. If output_path is omitted, it defaults
+    to input_path with an "_extended" suffix in the same directory.
     """
     if step is not None and step not in _STEP_ORDER:
         msg = f"step must be one of {_STEP_ORDER}, got {step!r}"
         raise ValueError(msg)
 
     input_path = Path(input_path)
-    output_path = Path(output_path)
+    output_path = (
+        Path(output_path)
+        if output_path is not None
+        else input_path.with_stem(input_path.stem + "_extended")
+    )
     if output_path.exists() and not overwrite:
         msg = f"output already exists: {output_path}"
         raise FileExistsError(msg)

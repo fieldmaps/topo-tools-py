@@ -49,8 +49,8 @@ Memory efficiency is a first-class concern. Prefer approaches that minimize inte
 uv sync
 
 # Run the extend tool (processes exactly one file per call)
-uv run topo-tools extend --input-file=... --output-file=...
-# equivalently: uv run python -m topo_tools extend ...
+uv run topo-tools extend example.geojson
+# equivalently: uv run python -m topo_tools extend example.geojson
 
 # Format and lint
 uv run ruff format && uv run ruff check
@@ -93,8 +93,10 @@ as a side effect of importing). Settings now flow in two ways:
   need nothing; `_03_points`/`_04_voronoi`/`_05_merge` need `debug`; `attempt` needs
   `memory_gb` + `debug`; `_06_outputs` needs `debug`; `get_connection` needs
   `threads` + `debug`). `topo_tools/cli/main.py`'s `extend` command maps CLI
-  flags/env vars 1:1 onto these kwargs (env var names match the old `config.py`
-  ones — `INPUT_FILE`, `MEMORY_GB`, `DEBUG`, etc. — via click's `envvar=`).
+  args/flags/env vars 1:1 onto these kwargs (env var names match the old
+  `config.py` ones — `INPUT_FILE`, `MEMORY_GB`, `DEBUG`, etc. — via click's
+  `envvar=`; `INPUT_FILE`/`OUTPUT_FILE` are positional `click.argument`s,
+  everything else is a `click.option`).
 - **Not user-configurable, pure literals** — `topo_tools/core/extend/_constants.py`
   (`MAX_POINTS`, `SNAP_TOLERANCE`, `DEFAULT_DISTANCE`,
   `MAX_POINTS_PER_SEGMENT`, the memory-model constants, `COPY_OPTS`). Safe to import
@@ -102,7 +104,7 @@ as a side effect of importing). Settings now flow in two ways:
 
 | Setting                    | Description                                                         |
 | -------------------------- | ------------------------------------------------------------------- |
-| `input_path` / `output_path` | Input/output file paths (one file per call)                       |
+| `input_path` / `output_path` | Input/output file paths (one file per call); `output_path` defaults to `input_path` with an `_extended` suffix when omitted |
 | `tmp_dir`                  | Intermediate DuckDB + Parquet location; defaults to a fresh `tempfile.mkdtemp()` when unset, cleaned up after the call unless `debug` |
 | `threads`                  | DuckDB thread count; unset defers to DuckDB default                 |
 | `memory_gb`                | Available memory in GB; derives attempt.py's per-file resampling distance/point budget (see `docs/voronoi-memory.md`) — set to the real container/deployment limit |

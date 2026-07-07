@@ -20,7 +20,7 @@ body:
         than a large real-world file — see `tests/test_extend.py` for the
         pattern.
       placeholder: |
-        topo-tools extend --input-file=example.geojson --output-file=out.geojson
+        topo-tools extend example.geojson out.geojson
     validations:
       required: true
 

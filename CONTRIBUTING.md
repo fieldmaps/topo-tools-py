@@ -20,8 +20,8 @@ uv run pre-commit install
 ## Running the tool locally
 
 ```bash
-uv run topo-tools extend --input-file=... --output-file=...
-# equivalently: uv run python -m topo_tools extend ...
+uv run topo-tools extend example.geojson
+# equivalently: uv run python -m topo_tools extend example.geojson
 ```
 
 ## Tests

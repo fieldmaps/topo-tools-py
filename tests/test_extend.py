@@ -49,6 +49,13 @@ def test_cli_help():
     result = CliRunner().invoke(cli, ["extend", "--help"])
     assert result.exit_code == 0
     assert "Extend polygon boundaries" in result.output
+    assert "Examples:" in result.output
+
+
+def test_cli_version():
+    result = CliRunner().invoke(cli, ["--version"])
+    assert result.exit_code == 0
+    assert "topo-tools" in result.output
 
 
 def test_extend_full_run(synthetic_input, tmp_path):
@@ -60,6 +67,29 @@ def test_extend_full_run(synthetic_input, tmp_path):
         conn.execute("LOAD spatial")
         row_count = conn.execute(f"SELECT COUNT(*) FROM '{output_path}'").fetchone()[0]
     assert row_count == len(_SYNTHETIC_WKT)
+
+
+def test_extend_default_output_path(synthetic_input):
+    extend(synthetic_input, overwrite=True)
+
+    expected = synthetic_input.with_stem(synthetic_input.stem + "_extended")
+    assert expected.exists()
+
+
+def test_cli_positional_args(synthetic_input, tmp_path):
+    output_path = tmp_path / "cli_out.parquet"
+    result = CliRunner().invoke(cli, ["extend", str(synthetic_input), str(output_path)])
+    assert result.exit_code == 0, result.output
+    assert output_path.exists()
+
+
+def test_cli_clean_error_on_existing_output(synthetic_input, tmp_path):
+    output_path = tmp_path / "exists.parquet"
+    output_path.touch()
+    result = CliRunner().invoke(cli, ["extend", str(synthetic_input), str(output_path)])
+    assert result.exit_code != 0
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "output already exists" in result.output
 
 
 def test_extend_steps(synthetic_input, tmp_path):
