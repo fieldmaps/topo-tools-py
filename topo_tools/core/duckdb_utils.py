@@ -117,6 +117,10 @@ def get_connection(
 ) -> ProfiledConnection:
     """Create a file-backed DuckDB connection with spatial loaded."""
     conn = duckdb_connect(str(tmp_dir / f"{name}.duckdb"))
+    # LOAD alone does not autoinstall -- fails outright on a machine that has
+    # never cached the spatial extension, network or not. INSTALL is a cheap
+    # no-op (~40ms, no network) once it's already cached.
+    conn.execute("INSTALL spatial")
     conn.execute("LOAD spatial")
     conn.execute("SET enable_progress_bar = false")
     conn.execute("SET geometry_always_xy = true")
