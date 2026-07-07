@@ -3,14 +3,31 @@ name = "topo-tools"
 version = "0.1.0"
 description = "DuckDB-powered geospatial topology utilities (edge-matching, topology cleaning, more)"
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = ["click", "duckdb", "psutil"]
+license = "MIT"
+authors = [{ name = "fieldmaps.io" }]
+requires-python = ">=3.10"
+dependencies = ["click", "duckdb>=1.5.3", "psutil"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+
+[project.urls]
+Homepage = "https://github.com/fieldmaps/topo-tools-py"
+Repository = "https://github.com/fieldmaps/topo-tools-py"
+Issues = "https://github.com/fieldmaps/topo-tools-py/issues"
 
 [project.scripts]
 topo-tools = "topo_tools.cli.main:cli"
 
 [dependency-groups]
-dev = ["pre-commit", "ruff"]
+dev = ["pre-commit", "pytest", "ruff"]
 
 [build-system]
 requires = ["uv_build>=0.11.26,<0.12.0"]
@@ -25,3 +42,6 @@ fix = true
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = ["COM812", "D203", "D213", "S603", "S607", "S608"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN", "D103", "INP001", "S101"]

@@ -6,7 +6,7 @@ import tempfile
 from logging import getLogger
 from pathlib import Path
 from types import FrameType
-from typing import Never
+from typing import NoReturn
 
 from topo_tools.core.duckdb_utils import (
     cleanup_tmp,
@@ -83,7 +83,7 @@ def extend(  # noqa: C901, PLR0912, PLR0913, PLR0915
     with log_file(name, tmp_dir_path):
         conn = get_connection(name, tmp_dir_path, threads=threads, debug=debug)
 
-        def _interrupt(_sig: int, _frame: FrameType | None) -> Never:
+        def _interrupt(_sig: int, _frame: FrameType | None) -> NoReturn:
             conn.interrupt()
             raise KeyboardInterrupt
 
