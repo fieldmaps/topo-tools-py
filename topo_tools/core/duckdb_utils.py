@@ -8,11 +8,9 @@ from collections.abc import Iterator
 from logging import FileHandler, Formatter, getLogger
 from pathlib import Path
 
-import psutil
 from duckdb import DuckDBPyConnection
 from duckdb import connect as duckdb_connect
 
-_PROCESS = psutil.Process()
 logger = getLogger(__name__)
 
 _GEO_PARQUET = (
@@ -33,6 +31,11 @@ class ProfiledConnection:
     def __init__(self, conn: DuckDBPyConnection, *, debug: bool = False) -> None:  # noqa: D107
         self._conn = conn
         self._debug = debug
+        self._process = None
+        if debug:
+            import psutil  # noqa: PLC0415 -- only installed/needed for --debug
+
+            self._process = psutil.Process()
 
     def execute(self, query: str, parameters: list | None = None):  # noqa: ANN201
         """Log wall-clock time, RSS peak, and duckdb delta/total, then forward."""
@@ -43,7 +46,7 @@ class ProfiledConnection:
                 else self._conn.execute(query)
             )
         t0 = time.perf_counter()
-        before_rss = _PROCESS.memory_info().rss
+        before_rss = self._process.memory_info().rss
         before_ddb = self._conn.execute(_MEM_Q).fetchall()[0][0]
 
         peak_rss = [before_rss]
@@ -52,7 +55,7 @@ class ProfiledConnection:
         def _poll() -> None:
             while not stop.is_set():
                 with contextlib.suppress(Exception):
-                    peak_rss[0] = max(peak_rss[0], _PROCESS.memory_info().rss)
+                    peak_rss[0] = max(peak_rss[0], self._process.memory_info().rss)
                 stop.wait(0.05)
 
         threading.Thread(target=_poll, daemon=True).start()
@@ -67,7 +70,7 @@ class ProfiledConnection:
         rows = result.fetchall()
 
         stop.set()
-        after_rss = _PROCESS.memory_info().rss
+        after_rss = self._process.memory_info().rss
         peak_rss[0] = max(peak_rss[0], after_rss)
         after_ddb = self._conn.execute(_MEM_Q).fetchall()[0][0]
 
