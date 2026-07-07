@@ -11,9 +11,10 @@ None of the above needs to be redone for future releases. It's specific to real 
 ## Cutting a real release
 
 1. Bump `version` in `pyproject.toml`.
-2. Merge to `main` (release-triggered workflows run from the default branch).
-3. GitHub → Releases → Draft a new release → tag it (e.g. `v0.1.1`) → Publish release.
-4. Approve the `publish` job in the Actions run (the required-reviewer gate from the environment setup above).
+2. Move `CHANGELOG.md`'s `[Unreleased]` entries under a new `## [x.y.z] - YYYY-MM-DD` heading, and add a matching link reference at the bottom of the file.
+3. Merge to `main` (release-triggered workflows run from the default branch).
+4. GitHub → Releases → Draft a new release → tag it (e.g. `v0.1.1`) → Publish release.
+5. Approve the `publish` job in the Actions run (the required-reviewer gate from the environment setup above).
 
 Version numbers, once uploaded, are permanent — PyPI never allows re-uploading the same filename again, even after deletion. Staying in `0.x` (SemVer's "no compatibility promises yet" range) means there's no expectation of a steady cadence or of never breaking the CLI/API between releases.
 

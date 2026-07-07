@@ -18,3 +18,10 @@ repos:
     hooks:
       - id: ruff-format
       - id: ruff-check
+  - repo: local
+    hooks:
+      - id: lint-imports
+        name: import-linter
+        entry: uv run lint-imports
+        language: system
+        pass_filenames: false

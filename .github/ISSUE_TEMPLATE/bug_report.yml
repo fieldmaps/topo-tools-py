@@ -1,0 +1,48 @@
+name: Bug report
+description: Something isn't working as expected
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened
+      description: What did you expect, and what actually happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: >
+        Ideally the exact command/code you ran. If the bug depends on input
+        data, a small synthetic example (a few polygons) is more useful
+        than a large real-world file — see `tests/test_extend.py` for the
+        pattern.
+      placeholder: |
+        topo-tools extend --input-file=example.geojson --output-file=out.geojson
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error output
+      description: Full traceback or error message. Run with `--debug` if possible.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: topo-tools version
+      description: Output of `uv run topo-tools --version` or `pip show topo-tools`
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Python version and OS
+      placeholder: "Python 3.12, macOS 15 / Ubuntu 24.04 / Windows 11"
+    validations:
+      required: true

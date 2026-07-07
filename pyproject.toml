@@ -27,7 +27,7 @@ Issues = "https://github.com/fieldmaps/topo-tools-py/issues"
 topo-tools = "topo_tools.cli.main:cli"
 
 [dependency-groups]
-dev = ["pre-commit", "pytest", "ruff"]
+dev = ["import-linter", "pre-commit", "pytest", "ruff"]
 
 [build-system]
 requires = ["uv_build>=0.11.26,<0.12.0"]
@@ -45,3 +45,21 @@ ignore = ["COM812", "D203", "D213", "S603", "S607", "S608"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN", "D103", "INP001", "S101"]
+
+[tool.importlinter]
+root_package = "topo_tools"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+id = "core-no-click"
+name = "Core modules must not import Click"
+type = "forbidden"
+source_modules = ["topo_tools.core"]
+forbidden_modules = ["click"]
+
+[[tool.importlinter.contracts]]
+id = "api-no-cli"
+name = "API modules must not import CLI"
+type = "forbidden"
+source_modules = ["topo_tools.api"]
+forbidden_modules = ["topo_tools.cli"]

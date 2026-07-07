@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest a new tool, option, or improvement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve
+      description: What are you trying to do that isn't currently possible or is awkward today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would the API/CLI look like? Sketch it out if you can.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
