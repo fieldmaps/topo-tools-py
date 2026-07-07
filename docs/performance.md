@@ -6,6 +6,14 @@ Machine: Apple Silicon, macOS, 10 logical cores.
 
 ---
 
+## Why one file per process
+
+`extend()`/`topo-tools extend` process exactly one file per call by design.
+Looping over many files *within a single process* has caused unbounded memory
+growth in the past: GEOS's native heap isn't fully released between files, even
+with the DuckDB connection closed. Call it once per file from separate OS
+processes instead.
+
 ## Memory profiling methodology
 
 **RSS peak is the primary metric** for Docker/WASM sizing. `duckdb_memory()` is unreliable
