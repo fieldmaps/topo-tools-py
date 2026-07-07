@@ -164,3 +164,4 @@ gh api "repos/duckdb/duckdb-spatial/contents/docs/functions.md?ref=${DUCKDB_REF}
 - `docs/topology.md` — topology approach (ST_Node + ST_Polygonize), DuckDB spatial function reference, SPATIAL_JOIN memory reservation bug
 - `docs/performance.md` — thread-scaling benchmarks, pipeline phase profiles, `get_connection` settings, RTREE experiment
 - `docs/voronoi-memory.md` — Voronoi collinearity degeneracy fix (segment cap, dynamic resampling distance), `--memory-gb`-derived point budget fitted inside a real memory-limited Docker container, and two documented (not gated) memory ceilings in `inputs.py`/`lines.py` that genuinely exceed 4GB for large files (`phl_admin3`, `idn_admin3`)
+- `docs/publishing.md` — PyPI release process (GitHub Release → required-reviewer approval → trusted-publisher OIDC), and the TestPyPI rehearsal loop for testing packaging changes
