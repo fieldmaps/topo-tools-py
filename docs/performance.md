@@ -6,6 +6,19 @@ Machine: Apple Silicon, macOS, 10 logical cores.
 
 ---
 
+## Container / platform notes
+
+- No wheel is published for Alpine/musl (`python:*-alpine` images) or for glibc
+  <2.26 (e.g. RHEL/CentOS 7, Amazon Linux 2) — these can't get a prebuilt
+  `duckdb` wheel from PyPI. Use a glibc-based image (e.g. `python:3.x-slim`)
+  instead.
+- Every CLI flag also has an environment variable equivalent (`INPUT_FILE`,
+  `MEMORY_GB`, `DEBUG`, etc. — see `topo_tools/cli/main.py`), useful when
+  flags are awkward to pass in a container entrypoint.
+- Air-gapped or network-restricted environments need the DuckDB `spatial`
+  extension pre-installed rather than downloaded on first run (see
+  [DuckDB's extension docs](https://duckdb.org/docs/extensions/overview)).
+
 ## Why one file per process
 
 `extend()`/`topo-tools extend` process exactly one file per call by design.
