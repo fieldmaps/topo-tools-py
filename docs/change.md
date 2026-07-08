@@ -232,3 +232,36 @@ auto-default to defer to, they're this tool's own tunables.
 ## No `--memory-gb`
 
 Like `clean`, there's no Voronoi stage to size a resampling budget for.
+
+## Portolan-scale profiling
+
+Real old/new version pairs from the portolan catalog, `--debug`, Apple
+Silicon/10 logical cores:
+
+| Comparison                    | fids (a/b)     | Wall time | RSS peak | Notable classes                          |
+| ------------------------------ | -------------- | --------- | -------- | ----------------------------------------- |
+| Philippines admin3 v02→v03     | 1,642 / 1,642  | 167s      | 3.98 GB  | 14 merge, 12 split, 4 modified, 1 created |
+| Ethiopia admin3 v01→v04        | 981 / ~1,165   | 21s       | 506 MB   | 262 split, 143 modified, 29 created, 28 complex, 10 merge, 8 removed |
+| Ukraine admin3 v01→v05         | 10,375 / 1,769 | 46s       | 957 MB   | 9,860 merge (finer v01 consolidated into v05) |
+
+All three ran clean on the first attempt -- no correctness or scale issues
+found, unlike `clean`'s overlap-detection bugs (see `docs/clean.md`). The
+Ethiopia and Ukraine runs are good coverage of the classification taxonomy:
+Ethiopia's real federal-boundary splits exercise `split`/`complex`/`merge`/
+`removed` together, and Ukraine's 10,375→1,769 fid collapse stress-tests
+`merge` cardinality at real scale (9,860 rows in one pass, well under a
+second of the 46s total).
+
+**`--link-by-code` footgun, found via the Philippines run:** its
+`adm3_pcode` values changed format entirely between v02 and v03 (e.g.
+`PH175304000` → `PH1705304`) — a PSGC renumbering, not a real rename. Every
+1:1 spatially-matched pair therefore has `a_code != b_code`, and per this
+tool's documented classification rule (`renamed` fires whenever code *or*
+name differs under linking, see "Classification" above), all 1,624 stable
+units came back `renamed` instead of `unchanged`. Re-running the identical
+comparison in pure spatial mode (no `--link-by-code`) gave the expected
+`unchanged: 1,624` with everything else unchanged — confirming this is
+`change` working exactly as designed, not a bug, but it's a sharp edge:
+**verify a code column is actually stable across the two versions being
+compared before enabling `--link-by-code`** -- a wholesale code-scheme
+change will otherwise read as a wall of false `renamed` rows.

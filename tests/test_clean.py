@@ -24,6 +24,11 @@ from topo_tools.cli.main import cli
 #   - fid 7-8: fid 8 sits 0.00003 degrees (~3.3m) from fid 7 -- within the
 #     default 10m sliver tolerance, but not an enclosed gap (open inlet), so
 #     it's detected only as a sliver, never auto-fixed.
+#   - fid 9-10: fid 10 sits fully inside fid 9 (a duplicated/nested-digitizing
+#     defect). The overlap join's predicate is ST_Overlaps OR ST_Contains,
+#     not ST_Intersects -- ST_Overlaps alone is false here by OGC definition
+#     (the intersection equals fid 10 exactly, not "different from both
+#     inputs"), so this pair only gets caught via the ST_Contains half.
 _SYNTHETIC_WKT = [
     (1, "POLYGON((0 0, 3 0, 3 1, 2 1, 1 1, 0 1, 0 0))"),
     (2, "POLYGON((0 2, 1 2, 2 2, 3 2, 3 3, 0 3, 0 2))"),
@@ -33,6 +38,8 @@ _SYNTHETIC_WKT = [
     (6, "POLYGON((10.95 0, 12 0, 12 1, 10.95 1, 10.95 0))"),
     (7, "POLYGON((20 0, 21 0, 21 1, 20 1, 20 0))"),
     (8, "POLYGON((21.00003 0, 22 0, 22 1, 21.00003 1, 21.00003 0))"),
+    (9, "POLYGON((30 0, 32 0, 32 2, 30 2, 30 0))"),
+    (10, "POLYGON((30.5 0.5, 31.5 0.5, 31.5 1.5, 30.5 1.5, 30.5 0.5))"),
 ]
 
 _STEPS = ["inputs", "issues", "clean", "outputs"]
@@ -96,6 +103,31 @@ def test_clean_full_run(synthetic_input, tmp_path):
         }
     assert row_count == len(_SYNTHETIC_WKT)
     assert kinds == {"gap", "overlap", "sliver"}
+
+
+def test_clean_detects_full_containment_overlap(synthetic_input, tmp_path):
+    """A fully-nested duplicate polygon (id 10 inside id 9) is an overlap.
+
+    Regression for the overlap join predicate: ST_Overlaps alone is false
+    for full containment (OGC: the intersection must differ from both
+    inputs), so this only gets caught via the ST_Contains half. Located by
+    geometry, not unit_a/unit_b -- those reference the internal `fid`
+    (row_number() over an unordered scan, since preserve_insertion_order is
+    off), which isn't guaranteed to match the source "id" column.
+    """
+    output_path = tmp_path / "out.parquet"
+    issues_path = tmp_path / "issues.parquet"
+    clean(synthetic_input, output_path, issues_path, overwrite=True)
+
+    with duckdb.connect() as conn:
+        conn.execute("LOAD spatial")
+        area = conn.execute(f"""
+            SELECT ST_Area(geometry) FROM '{issues_path}'
+            WHERE kind = 'overlap'
+              AND ST_Within(geometry, ST_MakeEnvelope(30, 0, 32, 2))
+        """).fetchall()
+    # Full containment -- the overlap area equals fid 10's entire 1x1 extent.
+    assert area == [(1.0,)]
 
 
 def test_clean_default_output_paths(synthetic_input):

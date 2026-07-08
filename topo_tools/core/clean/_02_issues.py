@@ -11,7 +11,9 @@ topo-tools-js/src/lib/tools/topology-cleaner/pipeline/issues.ts:
 - Overlaps: bbox-prefiltered pairwise ST_Intersection, whole-fid bboxes (not
   per-part -- see core/extend/_02_lines.py's neighbor self-join and
   docs/voronoi-memory.md for why per-part explosion regresses
-  single-fid-many-parts datasets like Chile).
+  single-fid-many-parts datasets like Chile). The join predicate is
+  ST_Overlaps/ST_Contains, not ST_Intersects -- see the note on
+  `_build_overlaps` below.
 - Slivers: ST_CoverageInvalidEdges_Agg(geom, tolerance) flags near-miss
   boundary edges (within `tolerance`) not already explained by a detected
   gap/overlap region; those regions are subtracted first so a genuine
@@ -104,6 +106,29 @@ def _build_gaps(
 def _build_overlaps(
     conn: DuckDBPyConnection, tmp: str, table: str, min_area_deg2: float
 ) -> None:
+    # ST_Intersects is true for any pair of polygons that merely share a
+    # boundary edge -- the normal case for every adjacent pair in a coverage
+    # layer, not a defect. At real admin-boundary scale (thousands of fids,
+    # e.g. archipelago admin3 layers) that floods the join with candidates
+    # whose ST_Intersection is a degenerate line/point, each still paying for
+    # ST_Intersection + ST_MakeValid + ST_CollectionExtract. Confirmed on IDN
+    # admin3 (7,069 fids): ST_Intersects matched 18,457 pairs and the stage
+    # didn't finish in 6+ minutes. ST_Overlaps alone would miss a fully-
+    # duplicated or nested polygon pair (its intersection equals both/one
+    # input, so ST_Overlaps is false by OGC definition) -- ST_Contains in
+    # both directions covers that case.
+    #
+    # Second, unrelated fix on the same query: self-joining `table` directly
+    # (the real `_01` table, ~36 columns for real admin-boundary data) makes
+    # DuckDB fall back to near-single-threaded execution even though only
+    # fid/geom are referenced -- confirmed on IDN admin3: the join against
+    # `_01` ran at ~99% CPU (7 min), the identical join against a `(fid,
+    # geom)`-only projection of the same rows ran at ~420% CPU (102s). Always
+    # project to a narrow staging table before the self-join.
+    narrow = f"{table}_narrow"
+    conn.execute(f"""--sql
+        CREATE OR REPLACE TABLE "{narrow}" AS SELECT fid, geom FROM "{table}"
+    """)
     conn.execute(f"""--sql
         CREATE OR REPLACE TABLE "{tmp}" AS
         WITH pairs AS (
@@ -111,19 +136,24 @@ def _build_overlaps(
                    ST_MakeValid(
                        ST_CollectionExtract(ST_Intersection(a.geom, b.geom), 3)
                    ) AS geom
-            FROM "{table}" a JOIN "{table}" b
+            FROM "{narrow}" a JOIN "{narrow}" b
               ON a.fid < b.fid
               AND ST_XMax(b.geom) >= ST_XMin(a.geom)
               AND ST_XMin(b.geom) <= ST_XMax(a.geom)
               AND ST_YMax(b.geom) >= ST_YMin(a.geom)
               AND ST_YMin(b.geom) <= ST_YMax(a.geom)
-              AND ST_Intersects(a.geom, b.geom)
+              AND (
+                  ST_Overlaps(a.geom, b.geom)
+                  OR ST_Contains(a.geom, b.geom)
+                  OR ST_Contains(b.geom, a.geom)
+              )
         )
         SELECT row_number() OVER () AS n, unit_a, unit_b, geom
         FROM pairs
         WHERE geom IS NOT NULL AND NOT ST_IsEmpty(geom)
           AND ST_Area(geom) > {min_area_deg2}
     """)
+    conn.execute(f'DROP TABLE IF EXISTS "{narrow}"')
 
 
 def _build_slivers(  # noqa: PLR0913 -- each param is a distinct required input, not decomposable

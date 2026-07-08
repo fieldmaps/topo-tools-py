@@ -193,3 +193,46 @@ in `_constants.py`, ported from JS's `clean.ts`), then fall back to an empty
 result for that one kind (logged) rather than raising -- consistent with
 `match`'s "failed group is logged and dropped, not fatal" precedent, applied
 per-detection-kind here instead of per-group.
+
+## Portolan-scale profiling
+
+Real admin-boundary layers, `--debug`, Apple Silicon/10 logical cores:
+
+| Dataset            | fids  | Wall time | RSS peak   | Defects found            |
+| ------------------ | ----- | --------- | ---------- | ------------------------- |
+| Burundi admin2     | 122   | 1.1s      | 118 MB     | 2 sliver                  |
+| Chile admin3       | 345   | 132s      | 1.07 GB    | 27 sliver                 |
+| Indonesia admin3   | 7,069 | 503s      | 1.58 GB    | 8 gap, 151 sliver         |
+| Philippines admin3 | 1,642 | 396s      | **5.15 GB**| 16 gap, 33 sliver         |
+
+Two real bugs surfaced and fixed by this run (`_02_issues.py`'s
+`_build_overlaps`), both only visible past a few thousand fids:
+
+1. **Overlap join predicate was `ST_Intersects`, not `ST_Overlaps`/
+   `ST_Contains`.** `ST_Intersects` is true for any pair of polygons that
+   merely share a boundary edge -- the normal case for every adjacent pair in
+   a coverage layer, not a defect. On Indonesia admin3 (7,069 fids) this
+   matched 18,457 candidate pairs, each still paying for `ST_Intersection` +
+   `ST_MakeValid` + `ST_CollectionExtract`, and the stage did not finish in
+   6+ minutes. Switched the join predicate to `ST_Overlaps(a, b) OR
+   ST_Contains(a, b) OR ST_Contains(b, a)` -- `ST_Overlaps` alone would miss
+   a fully-duplicated or nested polygon pair (OGC: its intersection equals
+   one/both inputs, so `ST_Overlaps` is false by definition), hence the
+   `ST_Contains` half. Regression test:
+   `test_clean_detects_full_containment_overlap` in `tests/test_clean.py`.
+2. **Self-joining the wide `_01` table (36 columns for real admin data)
+   instead of a narrow `(fid, geom)` projection made DuckDB fall back to
+   near-single-threaded execution**, even though the join only references
+   `fid`/`geom`. Confirmed on Indonesia admin3: the join against `_01` ran at
+   ~99% CPU; the identical join against a narrow projection of the same rows
+   ran at ~420% CPU. `_build_overlaps` now always projects to
+   `{table}_narrow` before joining.
+
+**Philippines admin3 exceeds the 4 GB container target** (5.15 GB peak,
+driven by the `issues` stage). Unlike `extend`'s Voronoi stage, `clean` has
+no `--memory-gb`-derived knob to fall back on, so per this repo's "document,
+don't gate" policy (see `docs/voronoi-memory.md`) this is noted here rather
+than runtime-checked. If this becomes a real deployment blocker, the next
+lever to pull is the same one already applied above -- shrinking what the
+overlap self-join scans -- rather than adding a memory gate with nothing to
+fall back to.
