@@ -194,6 +194,15 @@ result for that one kind (logged) rather than raising -- consistent with
 `match`'s "failed group is logged and dropped, not fatal" precedent, applied
 per-detection-kind here instead of per-group.
 
+**Bug (fixed): the empty-result fallback didn't actually create the empty
+table.** `_run_with_retry` in `_02_issues.py` logged the second failure but
+never executed a fallback `CREATE TABLE` -- a double failure left that
+kind's temp table (`_02_tmp1`/`_02_tmp2`/`_02_tmp3`) entirely missing, which
+crashed `main()`'s downstream `UNION ALL` with a binder/catalog error
+instead of degrading gracefully as documented above. Fixed by threading an
+explicit `empty_sql` (matching each table's real schema) into
+`_run_with_retry`, executed only when both attempts fail.
+
 ## Portolan-scale profiling
 
 Real admin-boundary layers, `--debug`, Apple Silicon/10 logical cores:

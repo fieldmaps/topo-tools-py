@@ -47,9 +47,17 @@ def _run_with_retry(
     conn: DuckDBPyConnection,
     kind: str,
     source: str,
+    empty_sql: str,
     build: Callable[[DuckDBPyConnection, str], None],
 ) -> None:
-    """Call build(conn, source); on failure, retry once at reduced precision."""
+    """Call build(conn, source); on failure, retry once at reduced precision.
+
+    If both attempts fail, executes `empty_sql` so the target table this
+    `build` call was supposed to create always exists afterward -- the
+    module docstring promises "falls back to an empty result" but without
+    this, a double-failure left the table entirely missing and crashed the
+    downstream UNION ALL in `main()` with a binder/catalog error instead.
+    """
     try:
         build(conn, source)
     except Exception as e:  # noqa: BLE001 -- GEOS topology failures surface as generic duckdb errors
@@ -76,6 +84,7 @@ def _run_with_retry(
             kind,
             e,
         )
+        conn.execute(empty_sql)
 
 
 def _build_gaps(
@@ -218,13 +227,28 @@ def main(
     overlaps_tmp = f"{name}_02_tmp2"
     slivers_tmp = f"{name}_02_tmp3"
 
+    empty_n_geom_sql = (
+        "CREATE OR REPLACE TABLE {tmp} AS "
+        "SELECT NULL::BIGINT AS n, NULL::GEOMETRY AS geom WHERE FALSE"
+    )
+    empty_overlaps_sql = (
+        "CREATE OR REPLACE TABLE {tmp} AS "
+        "SELECT NULL::BIGINT AS n, NULL::BIGINT AS unit_a, "
+        "NULL::BIGINT AS unit_b, NULL::GEOMETRY AS geom WHERE FALSE"
+    )
+
     _run_with_retry(
-        conn, "gap", table, lambda c, t: _build_gaps(c, gaps_tmp, t, min_area_deg2)
+        conn,
+        "gap",
+        table,
+        empty_n_geom_sql.format(tmp=f'"{gaps_tmp}"'),
+        lambda c, t: _build_gaps(c, gaps_tmp, t, min_area_deg2),
     )
     _run_with_retry(
         conn,
         "overlap",
         table,
+        empty_overlaps_sql.format(tmp=f'"{overlaps_tmp}"'),
         lambda c, t: _build_overlaps(c, overlaps_tmp, t, min_area_deg2),
     )
     if sliver_tolerance_m > 0:
@@ -233,16 +257,13 @@ def main(
             conn,
             "sliver",
             table,
+            empty_n_geom_sql.format(tmp=f'"{slivers_tmp}"'),
             lambda c, t: _build_slivers(
                 c, slivers_tmp, t, tol_deg, gaps_tmp, overlaps_tmp
             ),
         )
     else:
-        empty_geom_sql = (
-            f'CREATE OR REPLACE TABLE "{slivers_tmp}" AS '
-            "SELECT NULL::GEOMETRY AS geom WHERE FALSE"
-        )
-        conn.execute(empty_geom_sql)
+        conn.execute(empty_n_geom_sql.format(tmp=f'"{slivers_tmp}"'))
 
     # area_m2/max_width_m: area_deg2 * METERS_PER_DEGREE^2 * cos(centroid_lat) for
     # area; MIC diameter (deg) * METERS_PER_DEGREE (no cos factor -- matches
