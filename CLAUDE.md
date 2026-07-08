@@ -75,6 +75,14 @@ above:
   STAC root catalog at `https://data.source.coop/hdx/cod-ab/catalog.json`
   (`id: portolan`; per-country `child` links, e.g. `./chl/catalog.json`)
 
+**HARD RULE — the portolan catalog (local copy or live source) is read-only.**
+Never write, modify, move, or delete anything inside
+`/Users/computer/GitHub/OCHA-DAP/hdx-scraper-cod-ab-global/portolan` — no
+`--output-path`/`--overwrite`, no `--tmp-dir`, no `--debug` exports, nothing.
+Only ever read from it. Every output/tmp/debug path for a portolan-sourced
+test run must point outside the catalog (e.g. the session scratchpad or
+`/tmp`).
+
 STAC-like layout: `{iso3}/{latest,vNN}/{adm0..adm3,lines,points}/{original,
 extended,matched}.parquet`. Distinct `vNN` directories are always genuinely
 different content (a new `vNN` is only cut when the boundaries actually
