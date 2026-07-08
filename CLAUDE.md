@@ -65,6 +65,25 @@ Memory efficiency is a first-class concern. Prefer approaches that minimize inte
 | **Burundi** (`bdi_admin2.parquet`) | Small, fast — good for quick iteration                             |
 | **Chile** (`chl_admin3.parquet`)   | Large coastline, most memory-intensive — the canonical stress test |
 
+A full portolan catalog (real, large-scale admin boundary data, multiple
+countries and admin levels, some with multiple historical versions) is
+available for at-scale/real-data stress testing beyond the two fixtures
+above:
+
+- **Local copy**: `/Users/computer/GitHub/OCHA-DAP/hdx-scraper-cod-ab-global/portolan`
+- **Live/canonical source**: [source.coop/hdx/cod-ab](https://source.coop/hdx/cod-ab),
+  STAC root catalog at `https://data.source.coop/hdx/cod-ab/catalog.json`
+  (`id: portolan`; per-country `child` links, e.g. `./chl/catalog.json`)
+
+STAC-like layout: `{iso3}/{latest,vNN}/{adm0..adm3,lines,points}/{original,
+extended,matched}.parquet`. Distinct `vNN` directories are always genuinely
+different content (a new `vNN` is only cut when the boundaries actually
+change), and `latest` points to whichever `vNN` is newest — but not every
+country has more than one `vNN` yet, so there's no old/new pair to diff
+(e.g. Chile only has `v01` so far). Check for multiple `vNN` directories
+before picking a country for an old/new comparison; Philippines admin3
+`v02`→`v03` is a real diff, used for `change`'s first at-scale test.
+
 ## Commands
 
 ```bash
