@@ -1,8 +1,15 @@
 """Non-user-configurable constants for the clean pipeline."""
 
 # Default detection cutoff for ST_CoverageInvalidEdges_Agg's tolerance
-# parameter, in meters. Ported from topo-tools-js's SLIVER_TOL_DEFAULT_M.
-SLIVER_TOLERANCE_DEFAULT_M = 10.0
+# parameter, in meters. Disabled (0) by default -- _build_slivers's
+# gap/overlap-subtraction step (buffer + cross join + ST_Difference against
+# unioned blobs) has triggered the DuckDB SPATIAL_JOIN-class memory
+# reservation OOM on tiny real-world inputs (Angola admin1, 21 fids), not
+# just at scale. Detect-only with no fix path makes chasing that bug low
+# value right now; revisit once DuckDB ships ST_Snap and slivers can
+# actually be fixed, not just reported. Opt back in with --sliver-tolerance.
+# Was 10.0 (ported from topo-tools-js's SLIVER_TOL_DEFAULT_M) before this.
+SLIVER_TOLERANCE_DEFAULT_M = 0.0
 
 # Floor below which detected gap/overlap regions are discarded as
 # floating-point noise rather than real defects. Ported from

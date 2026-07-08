@@ -88,7 +88,14 @@ def test_cli_help():
 def test_clean_full_run(synthetic_input, tmp_path):
     output_path = tmp_path / "out.parquet"
     issues_path = tmp_path / "issues.parquet"
-    clean(synthetic_input, output_path, issues_path, overwrite=True)
+    # sliver_tolerance_m explicit: default is 0 (disabled), see _constants.py.
+    clean(
+        synthetic_input,
+        output_path,
+        issues_path,
+        sliver_tolerance_m=10.0,
+        overwrite=True,
+    )
 
     assert output_path.exists()
     assert issues_path.exists()
@@ -178,6 +185,7 @@ def test_clean_sliver_never_autofixed(synthetic_input, tmp_path):
         issues_path,
         gap_width="all",
         snap_tolerance="auto",
+        sliver_tolerance_m=10.0,
         overwrite=True,
     )
 

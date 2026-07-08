@@ -28,7 +28,7 @@ clean("example.geojson")
 | `--issues-file` | Issues report path. Defaults to `OUTPUT_FILE` with an `_issues` suffix. |
 | `--gap-width` | `auto` (no fill), `all` (fill every detected gap, default), or a number in meters. |
 | `--snap-tolerance` | `auto` (GEOS's computed default, default) or a number in meters. Noding robustness only, not a way to fix slivers. |
-| `--sliver-tolerance` | Near-miss boundary detection cutoff, in meters (default `10.0`). `0` disables sliver detection. |
+| `--sliver-tolerance` | Near-miss boundary detection cutoff, in meters. `0` disables sliver detection (the default -- see "Sliver detection disabled by default" below). |
 | `--overwrite` | Overwrite an existing output file. |
 | `--threads` | DuckDB thread count. |
 | `--debug` | Keep intermediate tables, export to Parquet, log timing/memory per query. |
@@ -136,16 +136,41 @@ alteration" -- and must not be used to fix slivers (see above).
 ## `--sliver-tolerance`
 
 Detection cutoff for `ST_CoverageInvalidEdges_Agg(geom, tolerance)`, in
-meters (default `10.0`, matching JS's `SLIVER_TOL_DEFAULT_M`). `0` disables
-sliver detection entirely. Already-detected gap/overlap regions are
-subtracted (buffered by the same tolerance) from the raw invalid-edges result
-before it's reported as slivers, so a genuine overlap or enclosed gap isn't
+meters. `0` disables sliver detection entirely -- **this is now the
+default** (was `10.0`, matching JS's `SLIVER_TOL_DEFAULT_M`, until the bug
+below). When enabled, already-detected gap/overlap regions are subtracted
+(buffered by the same tolerance) from the raw invalid-edges result before
+it's reported as slivers, so a genuine overlap or enclosed gap isn't
 double-reported as a sliver too -- ported from JS's `sliverRegionsQuery`
 (commit `7eb1967`, "dedup slivers against detected overlaps"). This
 subtraction is not perfect at the fringes: a resolved overlap's edges can
 leave a short residual line fragment just outside the buffered overlap
 region, which will still show up as a (harmless, since review is manual
 anyway) extra sliver row.
+
+### Sliver detection disabled by default
+
+`_build_slivers`'s gap/overlap-subtraction step (`clusters` cross-joined with
+the unioned/buffered gap and overlap blobs via `LEFT JOIN ... ON TRUE`, then
+`ST_Difference`) reproducibly triggers a DuckDB out-of-memory error on real
+data -- confirmed on Angola admin1 (`hdx-cod-ab-ai`'s `ago_admin1.parquet`,
+only 21 fids / 490K vertices, nowhere near the scale where `extend`'s known
+memory ceilings kick in). The failure signature (`failed to allocate data of
+size X MiB (Y GiB/Y GiB used)` where `Y` equals `memory_limit` exactly, real
+RSS only ~100-600MB per `ProfiledConnection`) matches the class of bug
+documented in `docs/topology.md`'s "DuckDB 1.5.2 `SPATIAL_JOIN` Memory
+Reservation Bug" -- reproduced here on DuckDB 1.5.4, so either that bug
+persists past 1.5.2 under a different trigger, or `ST_CoverageInvalidEdges_Agg`
+combined with the cross-join/`ST_Difference` pattern hits the same class of
+internal reservation independently of an explicit `ST_Within`/`ST_Contains`
+join predicate. Root cause not fully isolated.
+
+Given sliver detection is report-only (never auto-fixed -- see "Why slivers
+are detect-only" below) and this OOM hits tiny real inputs, not just
+large-scale ones, chasing the exact trigger is low value right now. Disabled
+by default until DuckDB ships `ST_Snap` and slivers can actually be *fixed*,
+not just unreliably reported -- pass `--sliver-tolerance <meters>` to opt
+back in.
 
 ## Issues file schema
 

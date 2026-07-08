@@ -32,9 +32,11 @@ tools:
   its own parent. `core.match` depends on `core.extend`; the reverse
   dependency is forbidden by an import-linter contract (see Key Patterns).
 - **clean**: detects and fixes coverage defects (gaps, overlaps) in a single
-  polygon layer with `ST_CoverageClean`; detects but never auto-fixes
-  slivers (near-miss boundary mismatches), reporting them in a separate
-  issues file alongside the cleaned dataset for manual review. `core.clean`
+  polygon layer with `ST_CoverageClean`; can also detect (but never
+  auto-fix) slivers (near-miss boundary mismatches), reporting them in a
+  separate issues file alongside the cleaned dataset for manual review --
+  disabled by default (`--sliver-tolerance 0`) due to a real-data OOM bug
+  in detection, see `docs/clean.md`. `core.clean`
   depends on `core.extend`; the reverse dependency is forbidden by the same
   kind of import-linter contract as `match`. See `docs/clean.md`.
 - **change**: compares two versions of a polygon layer (old vs. new) and
@@ -257,7 +259,9 @@ as a side effect of importing). Settings now flow in two ways:
 (`_cleaned` suffix) and optional `issues_path` (`_issues` suffix, derived
 from `output_path`'s stem), plus `gap_width` (`"auto"`/`"all"`/a meters
 string, default `"all"`), `snap_tolerance` (`"auto"`/a meters string,
-default `"auto"`), `sliver_tolerance_m` (default `10.0`), and the same
+default `"auto"`), `sliver_tolerance_m` (default `0.0`, sliver detection
+disabled by default — see `docs/clean.md`'s "Sliver detection disabled by
+default"), and the same
 `threads`/`tmp_dir`/`overwrite`/`debug` settings; `step` chooses among
 `inputs/issues/clean/outputs`. No `memory_gb` — `clean` has no Voronoi stage
 to size a resampling budget for.
