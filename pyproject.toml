@@ -63,3 +63,10 @@ name = "API modules must not import CLI"
 type = "forbidden"
 source_modules = ["topo_tools.api"]
 forbidden_modules = ["topo_tools.cli"]
+
+[[tool.importlinter.contracts]]
+id = "match-may-use-extend-not-reverse"
+name = "match may depend on extend; extend must not depend on match"
+type = "forbidden"
+source_modules = ["topo_tools.core.extend"]
+forbidden_modules = ["topo_tools.core.match"]

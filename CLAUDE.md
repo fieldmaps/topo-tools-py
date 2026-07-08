@@ -19,12 +19,22 @@
 
 `topo-tools` is a Python package of DuckDB-powered geospatial topology utilities,
 `pip install`-able and importable, mirroring the organization of the sister JS app
-at `../topo-tools` (a DuckDB-WASM web app with the same tools). It currently ships
-one tool, **extend**: extends polygon boundaries outward using Voronoi diagrams,
-producing a complete coverage layer that fills gaps (e.g., coastlines, disputed
-areas, water bodies). It is used for matching sub-national boundaries to national
-boundaries and improving administrative boundary datasets. More tools (topology
-cleaning, etc.) are planned but not yet ported from the JS app.
+at `../topo-tools` (a DuckDB-WASM web app with the same tools). It ships two
+tools:
+
+- **extend**: extends polygon boundaries outward using Voronoi diagrams,
+  producing a complete coverage layer that fills gaps (e.g., coastlines,
+  disputed areas, water bodies).
+- **match**: fits a child polygon layer into a coarser parent/clip layer
+  (e.g. admin4 into admin0) by assigning each child to the parent it shares
+  the largest area with, grouping children by that assignment, running
+  `extend`'s pipeline within each group, and clipping each group's result to
+  its own parent. `core.match` depends on `core.extend`; the reverse
+  dependency is forbidden by an import-linter contract (see Key Patterns).
+
+Both are used for matching sub-national boundaries to national boundaries and
+improving administrative boundary datasets. More tools (topology cleaning,
+etc.) are planned but not yet ported from the JS app.
 
 ## Deployment Targets
 
@@ -52,6 +62,9 @@ uv sync
 uv run topo-tools extend example.geojson
 # equivalently: uv run python -m topo_tools extend example.geojson
 
+# Run the match tool (fits a child layer into a parent/clip layer)
+uv run topo-tools match children.geojson parents.geojson
+
 # Format and lint
 uv run ruff format && uv run ruff check
 ```
@@ -60,18 +73,26 @@ Pre-commit hooks run `uv-sync`, `ruff-format`, and `ruff-check` automatically.
 
 ## Architecture
 
-The pipeline has 5 sequential stages, each a standalone module in
-`topo_tools/core/extend/`. All stages share a single file-backed DuckDB connection;
-tables are the IPC mechanism between stages. Three layers, each with a specific job
+Each tool's pipeline is a sequence of stages, each a standalone module in its
+own `topo_tools/core/{tool}/` package. All stages of one `extend()`/`match()`
+call share a single file-backed DuckDB connection; tables are the IPC
+mechanism between stages (per-group subprocesses inside `match` are the one
+exception — see `docs/matching.md`). Three layers, each with a specific job
 (mirroring `geoparquet-io`'s `core`/`api`/`cli` split — see ADRs
 `0001-cli-core-separation`/`0004-python-api-mirrors-cli` in that repo):
 
-- `topo_tools/core/extend/` — the real stage implementations. No `click` import.
-- `topo_tools/api/extend.py` — the public `extend()` function; chains all stages
-  together for exactly one file per call. No `click` import.
+- `topo_tools/core/extend/`, `topo_tools/core/match/` — the real stage
+  implementations. No `click` import. `core.match` may import from
+  `core.extend` (it reuses `extend`'s stage functions per-group); the reverse
+  is forbidden by an import-linter contract (`pyproject.toml`).
+- `topo_tools/api/extend.py`, `topo_tools/api/match.py` — the public
+  `extend()`/`match()` functions; each chains its own tool's stages together
+  for exactly one file (or one child file + one clip file) per call. No
+  `click` import.
 - `topo_tools/cli/main.py` — the click CLI; maps flags/env vars onto a single
-  `api.extend()` call. Processes exactly one file per invocation — no directory
-  batching. The only layer allowed to import `click`.
+  `api.extend()`/`api.match()` call per invocation. Processes exactly one file
+  (or file pair) per invocation — no directory batching. The only layer
+  allowed to import `click`.
 
 ### Pipeline Stages
 
@@ -80,6 +101,28 @@ tables are the IPC mechanism between stages. Three layers, each with a specific 
 3. **`attempt.main`** — Wrapper around `points.main` + `voronoi.main` that retries with doubling distance on failure (0.0002 → 0.1024, up to 10 attempts); `points.main` creates `*_03a` (buffered endpoint union) and `*_03b` (interpolated points), `voronoi.main` generates Voronoi polygons (`*_04`)
 4. **`merge.main`** — Unions each fid's original geometry with its Voronoi extension (`*_04`) minus a bbox-prefiltered union of nearby originals, then runs a single whole-table `ST_CoverageClean` pass to close floating-point-scale seams (`*_05`)
 5. **`outputs.main`** — Validates topology and exports via DuckDB COPY
+
+### Match Pipeline Stages
+
+1. **`_01_inputs.main`** — Loads and coverage-cleans both the child and
+   parent/clip layers by delegating twice to `extend`'s own `_01_inputs.main`
+   (`{name}_child_01`, `{name}_parent_01`).
+2. **`_02_assign.main`** — Assigns each child to the parent it shares the
+   largest area with (bbox-prefiltered, part-exploded, ranked in EPSG:8857);
+   drops and logs children with zero overlap with any parent
+   (`{name}_02_pairs`, `{name}_02_assign`, `{name}_02_unassigned`).
+3. **`_03_groups.main`** — Groups children by assigned parent (always, even a
+   group of one); for each group, exports its children + parent geometry to
+   Parquet, runs `extend`'s `_02_lines`/`attempt`/`_05_merge` stage functions
+   in an isolated `multiprocessing` (`spawn`) subprocess, clips the result to
+   that group's parent, appends survivors into `{name}_03`. A failed group is
+   logged and dropped, not fatal — `match()` only raises if no group produces
+   any output at all. See `docs/matching.md` for the full rationale.
+4. **`_04_merge.main`** — Single whole-table `ST_CoverageClean` pass over
+   `{name}_03` to close cross-group seams (`{name}_04`).
+5. **`_05_outputs.main`** — Validates topology (reusing `extend`'s
+   `check_overlaps`/`check_gaps`, hoisted into `core/extend/_coverage.py` as
+   public functions) and exports via DuckDB COPY.
 
 ### Configuration
 
@@ -112,6 +155,11 @@ as a side effect of importing). Settings now flow in two ways:
 | `debug`                    | Keep intermediate tables, export all to Parquet, and log timing + memory delta per query |
 | `step`                     | Run only one named stage (inputs/lines/attempt/merge/outputs)       |
 
+`topo_tools.api.match.match()` takes the same settings plus a required
+`clip_path` (the parent/clip layer, positional between `input_path` and
+`output_path`); `output_path` defaults to an `_matched` suffix instead of
+`_extended`, and `step` chooses among `inputs/assign/groups/merge/outputs`.
+
 ### Table Naming Convention
 
 Tables are named `{name}_{stage}[suffix]` where stage is a two-digit number and suffix is either empty, a letter, or `_tmp{n}`:
@@ -122,6 +170,16 @@ Tables are named `{name}_{stage}[suffix]` where stage is a two-digit number and 
 
 The current sequence: `_01` → `_02` → `_03a/_03b` → `_04` → `_05`. `inputs.main`'s coverage-clean pass rewrites `_01` in place when violations are detected; it does not introduce a new suffix.
 
+`match` uses its own `name` (`{input}_match`, distinct from `extend`'s
+`{input}` so the two tools' tables/files never collide when run against the
+same input path and `tmp_dir`) and its own numbering: `{name}_child_01` /
+`{name}_parent_01` → `{name}_02_pairs`/`{name}_02_assign`/`{name}_02_unassigned`
+→ `{name}_03` (reassembled groups) → `{name}_04` (final coverage-clean). Each
+group's own `extend`-pipeline tables (`group_01` … `group_05`, `group_clip`)
+live in a private, per-group DuckDB file (`group.duckdb`, one at a time,
+reused sequentially) inside `{tmp_dir}/{name}_g{parent_fid}/`, never in
+`match`'s own connection — see `docs/matching.md`.
+
 ### Key Patterns
 
 - **DuckDB spatial extension** handles all geometry operations (`ST_*` functions). One file-backed connection is created per input file in `topo_tools/core/duckdb_utils.py` and returned as a `ProfiledConnection` proxy that logs timing and memory per query when `--debug` is set.
@@ -131,6 +189,8 @@ The current sequence: `_01` → `_02` → `_03a/_03b` → `_04` → `_05`. `inpu
 - **`duckdb_memory()` measurements in isolation underestimate pipeline peaks.** A fresh connection with few tables in the DuckDB file can show 4 GB for a query that peaks at 8 GB in a full pipeline run, because the buffer pool from other large tables (`_01`, `_04`, `_05_tmp1`, etc.) adds several GB of additional pressure. Profile with `--step=X --debug` on a database file that already has all prior-stage tables present.
 - **Avoid materializing one global `ST_Union_Agg` of `_01` as a per-row `ST_Difference`/join operand.** At Chile scale the union can hold millions of vertices; using it as an operand against every fid individually made GEOS pay that cost on every row and OOM'd outright (confirmed during development of `_05_merge.py`). Use a bbox-prefiltered join against nearby originals instead (see `_05_merge.py`'s `_05_tmp1`/`_05_tmp2`, which explodes multipolygon fids into parts first — a whole-fid bbox can span mainland-to-remote-island and defeat the prefilter). **`_02_lines.py`'s neighbor-union self-join deliberately does NOT do this** — it joins on whole-fid bboxes. Exploding it into per-part bboxes looks like the same fix but isn't: it helps files with many fids that each have a few widely-scattered parts (e.g. `idn_admin3`) but badly regresses files with one fid made of thousands of tightly-clustered parts (e.g. `chl_admin3` has a single fid with 3,796 parts) by multiplying self-join row count far more than the tighter bboxes save — confirmed empirically (Chile: 3.3GB peak with whole-fid bboxes vs. OOM at 10GB+ with per-part bboxes). See `docs/voronoi-memory.md`.
 - **Byte-exact preservation of original polygon vertices is not a goal.** `ST_CoverageClean` may shift any polygon's boundary, including previously-untouched ones. Don't reintroduce per-fid violator scoping, snapshot/restore, or escalation logic to protect vertex-level exactness — that machinery was removed deliberately (see `docs/topology.md`).
+- **`core.match` may import from `core.extend`; the reverse is forbidden.** Enforced by the `match-may-use-extend-not-reverse` import-linter contract in `pyproject.toml`. `match` reuses `extend`'s stage functions per-group rather than duplicating Voronoi gap-filling logic; `extend` must stay usable standalone with zero knowledge of `match`.
+- **`match`'s per-group work runs in an isolated subprocess, not `match()`'s own connection/process.** GEOS's native heap isn't fully released between files even after closing the DuckDB connection (the same finding that makes `extend()` process one file per OS process) — a many-parent-group `match()` run would hit the same failure mode in-process, just with groups substituting for files. See `docs/matching.md`.
 
 ### Supported Formats
 
@@ -164,6 +224,7 @@ gh api "repos/duckdb/duckdb-spatial/contents/docs/functions.md?ref=${DUCKDB_REF}
 ## Reference Docs
 
 - `docs/topology.md` — topology approach (ST_Node + ST_Polygonize), DuckDB spatial function reference, SPATIAL_JOIN memory reservation bug
+- `docs/matching.md` — match's largest-overlap assignment algorithm, per-group subprocess isolation rationale, the `fids=None` whole-table-clean constraint, and the check_gaps/parent-layer-gaps caveat
 - `docs/performance.md` — thread-scaling benchmarks, pipeline phase profiles, `get_connection` settings, RTREE experiment
 - `docs/voronoi-memory.md` — Voronoi collinearity degeneracy fix (segment cap, dynamic resampling distance), `--memory-gb`-derived point budget fitted inside a real memory-limited Docker container, and two documented (not gated) memory ceilings in `inputs.py`/`lines.py` that genuinely exceed 4GB for large files (`phl_admin3`, `idn_admin3`)
 - `docs/publishing.md` — PyPI release process (GitHub Release → required-reviewer approval → trusted-publisher OIDC), and the TestPyPI rehearsal loop for testing packaging changes

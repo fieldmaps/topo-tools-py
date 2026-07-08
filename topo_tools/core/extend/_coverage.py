@@ -1,6 +1,10 @@
 """Coverage-topology helpers shared by the inputs and merge stages."""
 
+from logging import getLogger
+
 from duckdb import DuckDBPyConnection
+
+logger = getLogger(__name__)
 
 
 def has_coverage_violations(conn: DuckDBPyConnection, table: str) -> bool:
@@ -9,6 +13,30 @@ def has_coverage_violations(conn: DuckDBPyConnection, table: str) -> bool:
         SELECT ST_CoverageInvalidEdges_Agg(geom) IS NOT NULL
         FROM (SELECT UNNEST(ST_Dump(geom)).geom AS geom FROM "{table}")
     """).fetchall()[0][0]
+
+
+def check_overlaps(conn: DuckDBPyConnection, table: str) -> None:
+    """Raise RuntimeError if `table.geom` has any overlaps or unmatched shared edges."""
+    if has_coverage_violations(conn, table):
+        error = f"OVERLAPS: {table}"
+        logger.error(error)
+        raise RuntimeError(error)
+
+
+def check_gaps(conn: DuckDBPyConnection, table: str) -> None:
+    """Raise RuntimeError if the union of `table.geom` has any interior holes."""
+    interior_rings = conn.execute(f"""--sql
+        WITH u AS (
+            SELECT ST_Union_Agg(geom) AS g
+            FROM (SELECT UNNEST(ST_Dump(geom)).geom AS geom FROM "{table}")
+        )
+        SELECT ST_NumInteriorRings(g)
+        FROM u
+    """).fetchall()[0][0]
+    if (interior_rings or 0) > 0:
+        error = f"GAPS: {table}"
+        logger.error(error)
+        raise RuntimeError(error)
 
 
 def coverage_clean(
