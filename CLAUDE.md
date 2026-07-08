@@ -19,7 +19,7 @@
 
 `topo-tools` is a Python package of DuckDB-powered geospatial topology utilities,
 `pip install`-able and importable, mirroring the organization of the sister JS app
-at `../topo-tools` (a DuckDB-WASM web app with the same tools). It ships two
+at `../topo-tools` (a DuckDB-WASM web app with the same tools). It ships three
 tools:
 
 - **extend**: extends polygon boundaries outward using Voronoi diagrams,
@@ -31,10 +31,15 @@ tools:
   `extend`'s pipeline within each group, and clipping each group's result to
   its own parent. `core.match` depends on `core.extend`; the reverse
   dependency is forbidden by an import-linter contract (see Key Patterns).
+- **clean**: detects and fixes coverage defects (gaps, overlaps) in a single
+  polygon layer with `ST_CoverageClean`; detects but never auto-fixes
+  slivers (near-miss boundary mismatches), reporting them in a separate
+  issues file alongside the cleaned dataset for manual review. `core.clean`
+  depends on `core.extend`; the reverse dependency is forbidden by the same
+  kind of import-linter contract as `match`. See `docs/cleaning.md`.
 
-Both are used for matching sub-national boundaries to national boundaries and
-improving administrative boundary datasets. More tools (topology cleaning,
-etc.) are planned but not yet ported from the JS app.
+All three are used for improving administrative boundary datasets and
+matching sub-national boundaries to national boundaries.
 
 ## Deployment Targets
 
@@ -65,6 +70,9 @@ uv run topo-tools extend example.geojson
 # Run the match tool (fits a child layer into a parent/clip layer)
 uv run topo-tools match children.geojson parents.geojson
 
+# Run the clean tool (detects/fixes gaps+overlaps, reports slivers separately)
+uv run topo-tools clean example.geojson
+
 # Format and lint
 uv run ruff format && uv run ruff check
 ```
@@ -81,18 +89,19 @@ exception — see `docs/matching.md`). Three layers, each with a specific job
 (mirroring `geoparquet-io`'s `core`/`api`/`cli` split — see ADRs
 `0001-cli-core-separation`/`0004-python-api-mirrors-cli` in that repo):
 
-- `topo_tools/core/extend/`, `topo_tools/core/match/` — the real stage
-  implementations. No `click` import. `core.match` may import from
-  `core.extend` (it reuses `extend`'s stage functions per-group); the reverse
-  is forbidden by an import-linter contract (`pyproject.toml`).
-- `topo_tools/api/extend.py`, `topo_tools/api/match.py` — the public
-  `extend()`/`match()` functions; each chains its own tool's stages together
-  for exactly one file (or one child file + one clip file) per call. No
-  `click` import.
+- `topo_tools/core/extend/`, `topo_tools/core/match/`, `topo_tools/core/clean/`
+  — the real stage implementations. No `click` import. `core.match` and
+  `core.clean` may each import from `core.extend` (both reuse `extend`'s
+  stage functions/helpers); the reverse is forbidden by import-linter
+  contracts (`pyproject.toml`).
+- `topo_tools/api/extend.py`, `topo_tools/api/match.py`, `topo_tools/api/clean.py`
+  — the public `extend()`/`match()`/`clean()` functions; each chains its own
+  tool's stages together for exactly one file (or one child file + one clip
+  file) per call. No `click` import.
 - `topo_tools/cli/main.py` — the click CLI; maps flags/env vars onto a single
-  `api.extend()`/`api.match()` call per invocation. Processes exactly one file
-  (or file pair) per invocation — no directory batching. The only layer
-  allowed to import `click`.
+  `api.extend()`/`api.match()`/`api.clean()` call per invocation. Processes
+  exactly one file (or file pair) per invocation — no directory batching.
+  The only layer allowed to import `click`.
 
 ### Pipeline Stages
 
@@ -123,6 +132,27 @@ exception — see `docs/matching.md`). Three layers, each with a specific job
 5. **`_05_outputs.main`** — Validates topology (reusing `extend`'s
    `check_overlaps`/`check_gaps`, hoisted into `core/extend/_coverage.py` as
    public functions) and exports via DuckDB COPY.
+
+### Clean Pipeline Stages
+
+1. **`_01_inputs.main`** — Reads and reprojects via `extend`'s
+   `read_and_reproject()` helper, **without** `extend`'s own auto-clean
+   pre-check — `clean`'s detection stage needs to see the raw, uncleaned
+   input (`{name}_01`).
+2. **`_02_issues.main`** — Detects gap/overlap/sliver defects, writing one
+   issues table (`{name}_02`: `key`, `kind`, `area_m2`, `max_width_m`,
+   `unit_a`, `unit_b`, `geom` — mixed Polygon/LineString geometry). Gaps only
+   catch fully-enclosed holes; overlaps are bbox-prefiltered pairwise
+   intersections; slivers are `ST_CoverageInvalidEdges_Agg` near-misses with
+   already-detected gap/overlap regions subtracted. See `docs/cleaning.md`.
+3. **`_03_clean.main`** — Fixes gaps/overlaps via `extend`'s
+   `coverage_clean()` (gated: a no-op copy if the input has no coverage
+   violations at all), writing `{name}_03`. Slivers are never touched.
+4. **`_04_outputs.main`** — Validates overlaps are gone (`check_overlaps`,
+   hard gate); logs (does not raise on) any gaps left unfilled by design;
+   exports both the cleaned dataset and the issues report. Does **not**
+   reuse `check_gaps` as a hard gate — unlike `extend`/`match`, `clean` can
+   legitimately leave gaps unfilled.
 
 ### Configuration
 
@@ -160,6 +190,15 @@ as a side effect of importing). Settings now flow in two ways:
 `output_path`); `output_path` defaults to an `_matched` suffix instead of
 `_extended`, and `step` chooses among `inputs/assign/groups/merge/outputs`.
 
+`topo_tools.api.clean.clean()` takes `input_path`, optional `output_path`
+(`_cleaned` suffix) and optional `issues_path` (`_issues` suffix, derived
+from `output_path`'s stem), plus `gap_width` (`"auto"`/`"all"`/a meters
+string, default `"all"`), `snap_tolerance` (`"auto"`/a meters string,
+default `"auto"`), `sliver_tolerance_m` (default `10.0`), and the same
+`threads`/`tmp_dir`/`overwrite`/`debug` settings; `step` chooses among
+`inputs/issues/clean/outputs`. No `memory_gb` — `clean` has no Voronoi stage
+to size a resampling budget for.
+
 ### Table Naming Convention
 
 Tables are named `{name}_{stage}[suffix]` where stage is a two-digit number and suffix is either empty, a letter, or `_tmp{n}`:
@@ -180,6 +219,13 @@ live in a private, per-group DuckDB file (`group.duckdb`, one at a time,
 reused sequentially) inside `{tmp_dir}/{name}_g{parent_fid}/`, never in
 `match`'s own connection — see `docs/matching.md`.
 
+`clean` uses its own `name` (`{input}_clean`, distinct from `extend`/`match`
+for the same collision-avoidance reason) and its own numbering: `{name}_01`
+→ `{name}_02` (with `_02_tmp1`/`_02_tmp2`/`_02_tmp3` per-kind intermediates,
+dropped unless `--debug`) → `{name}_03` (post-`ST_CoverageClean`). No `_04`
+whole-table re-clean pass like `extend`/`match` have — `clean` operates on
+one table throughout, there's no per-group reassembly seam to close.
+
 ### Key Patterns
 
 - **DuckDB spatial extension** handles all geometry operations (`ST_*` functions). One file-backed connection is created per input file in `topo_tools/core/duckdb_utils.py` and returned as a `ProfiledConnection` proxy that logs timing and memory per query when `--debug` is set.
@@ -191,6 +237,9 @@ reused sequentially) inside `{tmp_dir}/{name}_g{parent_fid}/`, never in
 - **Byte-exact preservation of original polygon vertices is not a goal.** `ST_CoverageClean` may shift any polygon's boundary, including previously-untouched ones. Don't reintroduce per-fid violator scoping, snapshot/restore, or escalation logic to protect vertex-level exactness — that machinery was removed deliberately (see `docs/topology.md`).
 - **`core.match` may import from `core.extend`; the reverse is forbidden.** Enforced by the `match-may-use-extend-not-reverse` import-linter contract in `pyproject.toml`. `match` reuses `extend`'s stage functions per-group rather than duplicating Voronoi gap-filling logic; `extend` must stay usable standalone with zero knowledge of `match`.
 - **`match`'s per-group work runs in an isolated subprocess, not `match()`'s own connection/process.** GEOS's native heap isn't fully released between files even after closing the DuckDB connection (the same finding that makes `extend()` process one file per OS process) — a many-parent-group `match()` run would hit the same failure mode in-process, just with groups substituting for files. See `docs/matching.md`.
+- **`core.clean` may import from `core.extend`; the reverse is forbidden.** Enforced by the `clean-may-use-extend-not-reverse` import-linter contract. `clean` reuses `extend`'s `read_and_reproject()` (inputs, without the auto-clean pre-check) and `coverage_clean()` (fix stage); `extend` must stay usable standalone with zero knowledge of `clean`.
+- **`ST_CoverageClean`'s `gap_maximum_width` has no GEOS-native auto-fill default.** Verified against upstream source (duckdb-spatial's `geos_module.cpp`, GEOS's `CoverageCleaner.h`/`.cpp`): the C++ class member is hardcoded to `0.0`, and a negative/omitted value is a no-op that leaves it there — unlike `snapping_distance`, which does have a real computed auto-default (`extent_diameter / 1e8`). `clean`'s `--gap-width all` mode computes an explicit width from the widest *detected* gap rather than relying on any GEOS-side "auto-fill." See `docs/cleaning.md`.
+- **`ST_Distance(GEOMETRY, GEOMETRY)` is unreliable for two disjoint polygons at small separations** — confirmed it returns `0.0` for two clearly-separated polygons (~3cm apart) on the installed DuckDB version, while the equivalent POINT/LINESTRING pair correctly returns the true distance. Use `ST_XMin`/`ST_XMax`/`ST_YMin`/`ST_YMax` extent comparisons or `ST_MaximumInscribedCircle` instead when checking polygon disjointness/gap width.
 
 ### Supported Formats
 
@@ -225,6 +274,7 @@ gh api "repos/duckdb/duckdb-spatial/contents/docs/functions.md?ref=${DUCKDB_REF}
 
 - `docs/topology.md` — topology approach (ST_Node + ST_Polygonize), DuckDB spatial function reference, SPATIAL_JOIN memory reservation bug
 - `docs/matching.md` — match's largest-overlap assignment algorithm, per-group subprocess isolation rationale, the `fids=None` whole-table-clean constraint, and the check_gaps/parent-layer-gaps caveat
+- `docs/cleaning.md` — clean's gap/overlap/sliver detection approach, why slivers are detect-only, verified `ST_CoverageClean` parameter semantics (`gap_maximum_width` has no GEOS-native auto-fill default, unlike `snapping_distance`), and the issues-file schema
 - `docs/performance.md` — thread-scaling benchmarks, pipeline phase profiles, `get_connection` settings, RTREE experiment
 - `docs/voronoi-memory.md` — Voronoi collinearity degeneracy fix (segment cap, dynamic resampling distance), `--memory-gb`-derived point budget fitted inside a real memory-limited Docker container, and two documented (not gated) memory ceilings in `inputs.py`/`lines.py` that genuinely exceed 4GB for large files (`phl_admin3`, `idn_admin3`)
 - `docs/publishing.md` — PyPI release process (GitHub Release → required-reviewer approval → trusted-publisher OIDC), and the TestPyPI rehearsal loop for testing packaging changes

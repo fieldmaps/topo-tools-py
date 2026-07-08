@@ -11,16 +11,12 @@ from ._coverage import coverage_clean, has_coverage_violations
 logger = getLogger(__name__)
 
 
-def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
-    """Import geodata into DuckDB tables, then clean coverage topology violations.
+def read_and_reproject(conn: DuckDBPyConnection, name: str, path: Path) -> None:
+    """Read geodata and reproject to EPSG:4326, storing the canonical `{name}_01` table.
 
-    ST_CoverageInvalidEdges_Agg gates whether ST_CoverageClean runs at all —
-    no-op when the input coverage has no invalid edges. Otherwise every
-    polygon's coordinates may shift, not just the violating ones. Does not
-    distinguish real holes from digitization slivers: inputs are expected to
-    be pre-cleaned upstream, and any narrow gap that slips through is treated
-    the same as a real hole (lake, enclave) — both are legitimate work for
-    the Voronoi-extension stage to divide across bordering polygons.
+    Split out from `main()` so `core.clean` can read+reproject without the
+    auto-clean pass below -- clean's detection stage needs to see the *raw*
+    input, not one ST_CoverageClean has already silently rewritten.
     """
     read_expr = (
         f"SELECT * FROM '{path}'"
@@ -72,6 +68,20 @@ def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
                {geom_expr} AS geom
         FROM ({read_expr})
     """)
+
+
+def main(conn: DuckDBPyConnection, name: str, path: Path) -> None:
+    """Import geodata into DuckDB tables, then clean coverage topology violations.
+
+    ST_CoverageInvalidEdges_Agg gates whether ST_CoverageClean runs at all —
+    no-op when the input coverage has no invalid edges. Otherwise every
+    polygon's coordinates may shift, not just the violating ones. Does not
+    distinguish real holes from digitization slivers: inputs are expected to
+    be pre-cleaned upstream, and any narrow gap that slips through is treated
+    the same as a real hole (lake, enclave) — both are legitimate work for
+    the Voronoi-extension stage to divide across bordering polygons.
+    """
+    read_and_reproject(conn, name, path)
 
     if has_coverage_violations(conn, f"{name}_01"):
         logger.info("cleaning coverage: invalid edges detected")

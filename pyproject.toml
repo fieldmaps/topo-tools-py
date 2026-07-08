@@ -70,3 +70,10 @@ name = "match may depend on extend; extend must not depend on match"
 type = "forbidden"
 source_modules = ["topo_tools.core.extend"]
 forbidden_modules = ["topo_tools.core.match"]
+
+[[tool.importlinter.contracts]]
+id = "clean-may-use-extend-not-reverse"
+name = "clean may depend on extend; extend must not depend on clean"
+type = "forbidden"
+source_modules = ["topo_tools.core.extend"]
+forbidden_modules = ["topo_tools.core.clean"]
