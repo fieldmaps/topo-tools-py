@@ -101,3 +101,41 @@ def test_extend_steps(synthetic_input, tmp_path):
             synthetic_input, output_path, tmp_dir=work_dir, step=step, overwrite=True
         )
     assert output_path.exists()
+
+
+def test_extend_renames_reserved_source_columns(tmp_path):
+    """A source OGC_FID column collides with GDAL's reserved FID handling.
+
+    Confirmed via a minimal repro against the installed DuckDB/GDAL: COPY to
+    .gpkg fails outright if the Arrow table has a column literally named
+    OGC_FID. inputs.main must rename it on load rather than let it crash the
+    final COPY.
+    """
+    path = tmp_path / "synthetic.parquet"
+    values = ", ".join(
+        f"({fid}, ST_GeomFromText('{wkt}'))" for fid, wkt in _SYNTHETIC_WKT
+    )
+    with duckdb.connect() as conn:
+        conn.execute("INSTALL spatial; LOAD spatial;")
+        conn.execute(
+            f"CREATE TABLE synth AS SELECT * FROM (VALUES {values}) AS t(OGC_FID, geom)"
+        )
+        conn.execute(f"COPY synth TO '{path}'")
+
+    output_path = tmp_path / "out.gpkg"
+    extend(path, output_path, overwrite=True)
+
+    assert output_path.exists()
+    with duckdb.connect() as conn:
+        conn.execute("LOAD spatial")
+        cols = [
+            c[0]
+            for c in conn.execute(
+                f"DESCRIBE SELECT * FROM ST_Read('{output_path}')"
+            ).fetchall()
+        ]
+        row_count = conn.execute(
+            f"SELECT COUNT(*) FROM ST_Read('{output_path}')"
+        ).fetchone()[0]
+    assert "OGC_FID_orig" in cols
+    assert row_count == len(_SYNTHETIC_WKT)

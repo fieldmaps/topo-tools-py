@@ -4,6 +4,15 @@ from decimal import Decimal
 
 MAX_POINTS = 10_000_000
 SNAP_TOLERANCE = 0.00000001
+# Exact (case-sensitive) column names DuckDB's GDAL COPY writer treats
+# specially as the feature's implicit FID, colliding with our own internal
+# "fid" or a source column already named this way -- confirmed via a minimal
+# repro against the installed DuckDB/GDAL: COPY ... (FORMAT GDAL, DRIVER
+# 'GPKG') fails outright if the Arrow table has either column literally
+# present. inputs.main renames any source column matching this set on load,
+# once, so nothing downstream (including match's export) ever has to guard
+# against it again.
+RESERVED_COLUMN_NAMES = ("fid", "OGC_FID")
 # Not user-configurable: attempt.py derives a per-file effective_distance from
 # --memory-gb and each file's own natural_res, so this only serves as (a) the
 # floor for boundaries with no fine natural detail (min(DEFAULT_DISTANCE,
