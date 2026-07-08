@@ -19,7 +19,7 @@
 
 `topo-tools` is a Python package of DuckDB-powered geospatial topology utilities,
 `pip install`-able and importable, mirroring the organization of the sister JS app
-at `../topo-tools` (a DuckDB-WASM web app with the same tools). It ships three
+at `../topo-tools` (a DuckDB-WASM web app with the same tools). It ships four
 tools:
 
 - **extend**: extends polygon boundaries outward using Voronoi diagrams,
@@ -37,8 +37,16 @@ tools:
   issues file alongside the cleaned dataset for manual review. `core.clean`
   depends on `core.extend`; the reverse dependency is forbidden by the same
   kind of import-linter contract as `match`. See `docs/cleaning.md`.
+- **change**: compares two versions of a polygon layer (old vs. new) and
+  classifies every unit as unchanged/renamed/modified/relocated/split/merge/
+  complex/created/removed, using spatial overlap (`tau_match`/`tau_same`
+  thresholds) and, optionally, code/name identity linking; always writes a
+  tabular changelog plus a spatial overlay layer colored by relationship
+  class. `core.change` depends on `core.extend`; the reverse dependency
+  is forbidden by the same kind of import-linter contract as `match`/
+  `clean`. See `docs/change.md`.
 
-All three are used for improving administrative boundary datasets and
+All four are used for improving administrative boundary datasets and
 matching sub-national boundaries to national boundaries.
 
 ## Deployment Targets
@@ -73,6 +81,9 @@ uv run topo-tools match children.geojson parents.geojson
 # Run the clean tool (detects/fixes gaps+overlaps, reports slivers separately)
 uv run topo-tools clean example.geojson
 
+# Run the change tool (compares an old/new polygon layer pair)
+uv run topo-tools change old.geojson new.geojson
+
 # Format and lint
 uv run ruff format && uv run ruff check
 ```
@@ -89,19 +100,20 @@ exception — see `docs/matching.md`). Three layers, each with a specific job
 (mirroring `geoparquet-io`'s `core`/`api`/`cli` split — see ADRs
 `0001-cli-core-separation`/`0004-python-api-mirrors-cli` in that repo):
 
-- `topo_tools/core/extend/`, `topo_tools/core/match/`, `topo_tools/core/clean/`
-  — the real stage implementations. No `click` import. `core.match` and
-  `core.clean` may each import from `core.extend` (both reuse `extend`'s
-  stage functions/helpers); the reverse is forbidden by import-linter
-  contracts (`pyproject.toml`).
-- `topo_tools/api/extend.py`, `topo_tools/api/match.py`, `topo_tools/api/clean.py`
-  — the public `extend()`/`match()`/`clean()` functions; each chains its own
-  tool's stages together for exactly one file (or one child file + one clip
-  file) per call. No `click` import.
+- `topo_tools/core/extend/`, `topo_tools/core/match/`, `topo_tools/core/clean/`,
+  `topo_tools/core/change/` — the real stage implementations. No `click`
+  import. `core.match`, `core.clean`, and `core.change` may each import
+  from `core.extend` (all three reuse `extend`'s stage functions/helpers);
+  the reverse is forbidden by import-linter contracts (`pyproject.toml`).
+- `topo_tools/api/extend.py`, `topo_tools/api/match.py`, `topo_tools/api/clean.py`,
+  `topo_tools/api/change.py` — the public `extend()`/`match()`/`clean()`/
+  `change()` functions; each chains its own tool's stages together for
+  exactly one file (or one child file + one clip file, or one old file + one
+  new file) per call. No `click` import.
 - `topo_tools/cli/main.py` — the click CLI; maps flags/env vars onto a single
-  `api.extend()`/`api.match()`/`api.clean()` call per invocation. Processes
-  exactly one file (or file pair) per invocation — no directory batching.
-  The only layer allowed to import `click`.
+  `api.extend()`/`api.match()`/`api.clean()`/`api.change()` call per
+  invocation. Processes exactly one file (or file pair) per invocation — no
+  directory batching. The only layer allowed to import `click`.
 
 ### Pipeline Stages
 
@@ -154,6 +166,30 @@ exception — see `docs/matching.md`). Three layers, each with a specific job
    reuse `check_gaps` as a hard gate — unlike `extend`/`match`, `clean` can
    legitimately leave gaps unfilled.
 
+### Change Pipeline Stages
+
+1. **`_01_inputs.main`** — Loads and coverage-cleans both the old and new
+   layers by delegating twice to `extend`'s own `_01_inputs.main`
+   (`{name}_a_01`, `{name}_b_01`).
+2. **`_02_overlap.main`** — Computes `shared_area`/`coverage_a`/`coverage_b`/
+   `iou` for every touching `(a_fid, b_fid)` pair (bbox-prefiltered,
+   part-exploded, ranked in EPSG:8857, same pattern as match's
+   `_02_assign.main`); keeps every pair with `shared_area > 0`, not just a
+   top-1 match — classification needs the full pair graph
+   (`{name}_02`).
+3. **`_03_classify.main`** — Identity (optional, code/name) + spatial
+   union-find clustering and cardinality-based classification, run in
+   Python (feature-count-scaled, not vertex-scaled — safe to hold in
+   memory); writes `{name}_03a` (classified pairs), `{name}_03b` (per-fid
+   cluster/class), `{name}_03c` (final changelog table). See
+   `docs/change.md` for the identity-claim guard and classification
+   rules.
+4. **`_04_outputs.main`** — Builds the spatial overlay render layer
+   (`{name}_04`: every new-version unit tagged with its relationship_class,
+   plus old-version units classed `removed`) and exports both the tabular
+   changelog and the overlay layer. No topology hard gate — `change` is a
+   read-only comparison, not a fix.
+
 ### Configuration
 
 No module-level `argparse`/env parsing anywhere — that pattern used to live in
@@ -199,6 +235,19 @@ default `"auto"`), `sliver_tolerance_m` (default `10.0`), and the same
 `inputs/issues/clean/outputs`. No `memory_gb` — `clean` has no Voronoi stage
 to size a resampling budget for.
 
+`topo_tools.api.change.change()` takes `old_path`/`new_path`
+(positional), optional `output_path` (tabular changelog, `.csv`/`.parquet`
+only, `"_changelog"` suffix combining both stems if omitted) and optional
+`overlay_path` (spatial layer, any of `extend`'s 4 formats, `"_overlay"`
+suffix inheriting `old_path`'s format if omitted), plus `tau_match` (default
+`0.8`), `tau_same` (default `0.98`), `link_by_code`/`link_by_name` (both
+`False` by default), `link_mode` (`"either"`/`"both"`, default `"either"`),
+`code_column_a`/`code_column_b`/`name_column_a`/`name_column_b` (auto-detected
+via regex when the corresponding link flag is set and no explicit column is
+given), and the same `threads`/`tmp_dir`/`overwrite`/`debug` settings; `step`
+chooses among `inputs/overlap/classify/outputs`. No `memory_gb` — same
+reasoning as `clean`.
+
 ### Table Naming Convention
 
 Tables are named `{name}_{stage}[suffix]` where stage is a two-digit number and suffix is either empty, a letter, or `_tmp{n}`:
@@ -226,6 +275,16 @@ dropped unless `--debug`) → `{name}_03` (post-`ST_CoverageClean`). No `_04`
 whole-table re-clean pass like `extend`/`match` have — `clean` operates on
 one table throughout, there's no per-group reassembly seam to close.
 
+`change` uses its own `name` (`{old_input}_changelog`, distinct from
+`extend`/`match`/`clean` for the same collision-avoidance reason) and its
+own numbering: `{name}_a_01`/`{name}_b_01` (old/new, mirroring match's
+`_child_01`/`_parent_01`) → `{name}_02` (overlap pairs, with
+`_02_tmp1`..`_02_tmp5` intermediates, dropped unless `--debug`) →
+`{name}_03a`/`{name}_03b`/`{name}_03c` (classified pairs, per-fid class,
+final changelog table — three persistent outputs, all lettered per
+convention) → `{name}_04` (spatial overlay render). No whole-table re-clean
+pass — `change` is a read-only comparison, not a fix.
+
 ### Key Patterns
 
 - **DuckDB spatial extension** handles all geometry operations (`ST_*` functions). One file-backed connection is created per input file in `topo_tools/core/duckdb_utils.py` and returned as a `ProfiledConnection` proxy that logs timing and memory per query when `--debug` is set.
@@ -240,6 +299,9 @@ one table throughout, there's no per-group reassembly seam to close.
 - **`core.clean` may import from `core.extend`; the reverse is forbidden.** Enforced by the `clean-may-use-extend-not-reverse` import-linter contract. `clean` reuses `extend`'s `read_and_reproject()` (inputs, without the auto-clean pre-check) and `coverage_clean()` (fix stage); `extend` must stay usable standalone with zero knowledge of `clean`.
 - **`ST_CoverageClean`'s `gap_maximum_width` has no GEOS-native auto-fill default.** Verified against upstream source (duckdb-spatial's `geos_module.cpp`, GEOS's `CoverageCleaner.h`/`.cpp`): the C++ class member is hardcoded to `0.0`, and a negative/omitted value is a no-op that leaves it there — unlike `snapping_distance`, which does have a real computed auto-default (`extent_diameter / 1e8`). `clean`'s `--gap-width all` mode computes an explicit width from the widest *detected* gap rather than relying on any GEOS-side "auto-fill." See `docs/cleaning.md`.
 - **`ST_Distance(GEOMETRY, GEOMETRY)` is unreliable for two disjoint polygons at small separations** — confirmed it returns `0.0` for two clearly-separated polygons (~3cm apart) on the installed DuckDB version, while the equivalent POINT/LINESTRING pair correctly returns the true distance. Use `ST_XMin`/`ST_XMax`/`ST_YMin`/`ST_YMax` extent comparisons or `ST_MaximumInscribedCircle` instead when checking polygon disjointness/gap width.
+- **`core.change` may import from `core.extend`; the reverse is forbidden.** Enforced by the `change-may-use-extend-not-reverse` import-linter contract. `change` reuses `extend`'s `_01_inputs.main()` (both layers pre-cleaned) and `_constants.COPY_OPTS` (overlay export); it deliberately does **not** import from `core.match` even though `_02_overlap.py`'s bbox-prefiltered join mirrors `_02_assign.py`'s pattern closely — `change` stays decoupled from `match`/`clean` the same way they're decoupled from each other, duplicating the one `EQUAL_AREA_CRS` literal rather than adding a cross-tool contract for it.
+- **`change`'s classification runs in Python, not SQL.** Union-find and cardinality classification (`core/change/_03_classify.py`, ported from topo-tools-js's `classify.ts`) scale with feature count, not vertex count, so fetching every pair row into memory and classifying with plain Python dicts/sets is safe under this repo's memory model even for a large admin layer — unlike the vertex-scaled Voronoi/coverage-clean work `extend`/`clean` do. See `docs/change.md`.
+- **`change` always uses exact `ST_Intersection`, never point-sampling.** The sister JS app falls back to a 32×32 point-sampling overlap estimate on a documented WASM-only GEOS OverlayNG bug; JS's own git history confirmed the bug doesn't reproduce natively, so the Python port drops the fallback entirely rather than porting dead-weight WASM-workaround code. See `docs/change.md`.
 
 ### Supported Formats
 
@@ -275,6 +337,7 @@ gh api "repos/duckdb/duckdb-spatial/contents/docs/functions.md?ref=${DUCKDB_REF}
 - `docs/topology.md` — topology approach (ST_Node + ST_Polygonize), DuckDB spatial function reference, SPATIAL_JOIN memory reservation bug
 - `docs/matching.md` — match's largest-overlap assignment algorithm, per-group subprocess isolation rationale, the `fids=None` whole-table-clean constraint, and the check_gaps/parent-layer-gaps caveat
 - `docs/cleaning.md` — clean's gap/overlap/sliver detection approach, why slivers are detect-only, verified `ST_CoverageClean` parameter semantics (`gap_maximum_width` has no GEOS-native auto-fill default, unlike `snapping_distance`), and the issues-file schema
+- `docs/change.md` — change's overlap/classification algorithm, why the WASM point-sampling fallback is dropped, the identity-claim guard's purpose, the output schema, and the two-output-file design
 - `docs/performance.md` — thread-scaling benchmarks, pipeline phase profiles, `get_connection` settings, RTREE experiment
 - `docs/voronoi-memory.md` — Voronoi collinearity degeneracy fix (segment cap, dynamic resampling distance), `--memory-gb`-derived point budget fitted inside a real memory-limited Docker container, and two documented (not gated) memory ceilings in `inputs.py`/`lines.py` that genuinely exceed 4GB for large files (`phl_admin3`, `idn_admin3`)
 - `docs/publishing.md` — PyPI release process (GitHub Release → required-reviewer approval → trusted-publisher OIDC), and the TestPyPI rehearsal loop for testing packaging changes
