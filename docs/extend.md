@@ -1,4 +1,45 @@
-# How it Works & Example Use Cases
+# Usage, How it Works & Example Use Cases
+
+## Usage
+
+```sh
+topo-tools extend example.geojson
+```
+
+```python
+from topo_tools import extend
+
+extend("example.geojson", "example_extended.geojson", memory_gb=4)
+```
+
+`OUTPUT_FILE` (positional, optional) defaults to `INPUT_FILE` with an
+`_extended` suffix.
+
+| Option | Description |
+| --- | --- |
+| `--memory-gb` | Available memory in GB; sizes point density automatically (default `4`). |
+| `--overwrite` | Overwrite an existing output file. |
+| `--threads` | DuckDB thread count. |
+| `--debug` | Keep intermediate tables, export to Parquet, log timing/memory per query. |
+| `--tmp-dir` | Intermediate DuckDB + Parquet location. |
+| `--step` | Run only one named stage: `inputs`, `lines`, `attempt`, `merge`, `outputs`. |
+
+```sh
+# Explicit output, sized for a 2GB container
+topo-tools extend example.gpkg example_extended.gpkg --memory-gb 2
+
+# Rerun and overwrite a previous output
+topo-tools extend example.parquet example_extended.parquet --overwrite
+```
+
+Polygons the size of small countries typically take a few seconds; larger
+ones at full detail finish in about 10 min. Processing time is proportional
+to total perimeter length rather than area. The spacing between points on a
+line is chosen automatically per file, balancing the source data's own level
+of detail against `--memory-gb` -- finer for naturally detailed boundaries,
+coarser only when needed to fit the memory budget.
+
+Run `topo-tools extend --help` for the full, always-current option list.
 
 ## How it Works
 

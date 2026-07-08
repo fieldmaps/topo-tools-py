@@ -2,7 +2,7 @@
 
 Overlaps are always fixed unconditionally by ST_CoverageClean itself -- no
 flag controls that. gap_width and snap_tolerance are the only tunables (see
-Decisions in the plan / docs/cleaning.md for why gap_maximum_width has no
+Decisions in the plan / docs/clean.md for why gap_maximum_width has no
 GEOS-native "auto-fill" default, unlike snapping_distance).
 """
 

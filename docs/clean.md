@@ -8,6 +8,43 @@ interactive Topology Cleaner tool
 changed in the port and why, and the `ST_CoverageClean` parameter semantics
 the design depends on.
 
+## Usage
+
+```sh
+topo-tools clean example.geojson
+```
+
+```python
+from topo_tools import clean
+
+clean("example.geojson")
+```
+
+`OUTPUT_FILE` (positional, optional) defaults to `INPUT_FILE` with a
+`_cleaned` suffix.
+
+| Option | Description |
+| --- | --- |
+| `--issues-file` | Issues report path. Defaults to `OUTPUT_FILE` with an `_issues` suffix. |
+| `--gap-width` | `auto` (no fill), `all` (fill every detected gap, default), or a number in meters. |
+| `--snap-tolerance` | `auto` (GEOS's computed default, default) or a number in meters. Noding robustness only, not a way to fix slivers. |
+| `--sliver-tolerance` | Near-miss boundary detection cutoff, in meters (default `10.0`). `0` disables sliver detection. |
+| `--overwrite` | Overwrite an existing output file. |
+| `--threads` | DuckDB thread count. |
+| `--debug` | Keep intermediate tables, export to Parquet, log timing/memory per query. |
+| `--tmp-dir` | Intermediate DuckDB + Parquet location. |
+| `--step` | Run only one named stage: `inputs`, `issues`, `clean`, `outputs`. |
+
+```sh
+# Don't fill any gaps, just detect and report every defect
+topo-tools clean example.gpkg --gap-width auto
+
+# Cap gap-filling at 5m, widen sliver detection to 25m
+topo-tools clean example.parquet --gap-width 5 --sliver-tolerance 25
+```
+
+Run `topo-tools clean --help` for the full, always-current option list.
+
 ## Pipeline
 
 1. **`_01_inputs`** -- reads and reprojects to EPSG:4326 via `extend`'s

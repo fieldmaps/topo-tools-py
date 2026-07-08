@@ -9,6 +9,49 @@ internally named `polygon-changelog`/`cw_*` from its original name "Boundary
 Cross-walk"); this doc covers what changed in the port and the
 classification algorithm's non-obvious pieces.
 
+## Usage
+
+```sh
+topo-tools change old.geojson new.geojson
+```
+
+```python
+from topo_tools import change
+
+change("admin3_v02.geojson", "admin3_v03.geojson")
+```
+
+`OUTPUT_FILE` (positional, optional; the tabular changelog, CSV or
+GeoParquet) defaults to a name combining both stems with a `_changelog`
+suffix. A spatial overlay layer colored by `relationship_class` is always
+written alongside it.
+
+| Option | Description |
+| --- | --- |
+| `--overlay-file` | Spatial overlay layer path. Defaults to `OUTPUT_FILE` with an `_overlay` suffix. |
+| `--tau-match` | Minimum overlap coverage for two units to be spatially linked (default `0.8`). |
+| `--tau-same` | Minimum IoU for a 1:1 linked pair to be unchanged/renamed rather than modified (default `0.98`). |
+| `--link-by-code` | Also link units sharing a unique code value across versions. |
+| `--link-by-name` | Also link units sharing a unique name value across versions. |
+| `--link-mode` | How code/name identity matches combine (`either`/`both`, default `either`; only matters if both link flags are set). |
+| `--code-column-a` / `--code-column-b` | Old/new-side code column; auto-detected if omitted. |
+| `--name-column-a` / `--name-column-b` | Old/new-side name column; auto-detected if omitted. |
+| `--overwrite` | Overwrite an existing output file. |
+| `--threads` | DuckDB thread count. |
+| `--debug` | Keep intermediate tables, export to Parquet, log timing/memory per query. |
+| `--tmp-dir` | Intermediate DuckDB + Parquet location. |
+| `--step` | Run only one named stage: `inputs`, `overlap`, `classify`, `outputs`. |
+
+```sh
+# Also link units sharing a unique pcode across versions
+topo-tools change old.gpkg new.gpkg --link-by-code
+
+# Loosen the "related" threshold for heavily redrawn boundaries
+topo-tools change old.parquet new.parquet --tau-match 0.6
+```
+
+Run `topo-tools change --help` for the full, always-current option list.
+
 ## Pipeline
 
 1. **`_01_inputs`** — loads and coverage-cleans both layers by delegating

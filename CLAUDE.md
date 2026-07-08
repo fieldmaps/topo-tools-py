@@ -36,7 +36,7 @@ tools:
   slivers (near-miss boundary mismatches), reporting them in a separate
   issues file alongside the cleaned dataset for manual review. `core.clean`
   depends on `core.extend`; the reverse dependency is forbidden by the same
-  kind of import-linter contract as `match`. See `docs/cleaning.md`.
+  kind of import-linter contract as `match`. See `docs/clean.md`.
 - **change**: compares two versions of a polygon layer (old vs. new) and
   classifies every unit as unchanged/renamed/modified/relocated/split/merge/
   complex/created/removed, using spatial overlap (`tau_match`/`tau_same`
@@ -115,7 +115,7 @@ Each tool's pipeline is a sequence of stages, each a standalone module in its
 own `topo_tools/core/{tool}/` package. All stages of one `extend()`/`match()`
 call share a single file-backed DuckDB connection; tables are the IPC
 mechanism between stages (per-group subprocesses inside `match` are the one
-exception — see `docs/matching.md`). Three layers, each with a specific job
+exception — see `docs/match.md`). Three layers, each with a specific job
 (mirroring `geoparquet-io`'s `core`/`api`/`cli` split — see ADRs
 `0001-cli-core-separation`/`0004-python-api-mirrors-cli` in that repo):
 
@@ -157,7 +157,7 @@ exception — see `docs/matching.md`). Three layers, each with a specific job
    in an isolated `multiprocessing` (`spawn`) subprocess, clips the result to
    that group's parent, appends survivors into `{name}_03`. A failed group is
    logged and dropped, not fatal — `match()` only raises if no group produces
-   any output at all. See `docs/matching.md` for the full rationale.
+   any output at all. See `docs/match.md` for the full rationale.
 4. **`_04_merge.main`** — Single whole-table `ST_CoverageClean` pass over
    `{name}_03` to close cross-group seams (`{name}_04`).
 5. **`_05_outputs.main`** — Validates topology (reusing `extend`'s
@@ -175,7 +175,7 @@ exception — see `docs/matching.md`). Three layers, each with a specific job
    `unit_a`, `unit_b`, `geom` — mixed Polygon/LineString geometry). Gaps only
    catch fully-enclosed holes; overlaps are bbox-prefiltered pairwise
    intersections; slivers are `ST_CoverageInvalidEdges_Agg` near-misses with
-   already-detected gap/overlap regions subtracted. See `docs/cleaning.md`.
+   already-detected gap/overlap regions subtracted. See `docs/clean.md`.
 3. **`_03_clean.main`** — Fixes gaps/overlaps via `extend`'s
    `coverage_clean()` (gated: a no-op copy if the input has no coverage
    violations at all), writing `{name}_03`. Slivers are never touched.
@@ -285,7 +285,7 @@ same input path and `tmp_dir`) and its own numbering: `{name}_child_01` /
 group's own `extend`-pipeline tables (`group_01` … `group_05`, `group_clip`)
 live in a private, per-group DuckDB file (`group.duckdb`, one at a time,
 reused sequentially) inside `{tmp_dir}/{name}_g{parent_fid}/`, never in
-`match`'s own connection — see `docs/matching.md`.
+`match`'s own connection — see `docs/match.md`.
 
 `clean` uses its own `name` (`{input}_clean`, distinct from `extend`/`match`
 for the same collision-avoidance reason) and its own numbering: `{name}_01`
@@ -314,9 +314,9 @@ pass — `change` is a read-only comparison, not a fix.
 - **Avoid materializing one global `ST_Union_Agg` of `_01` as a per-row `ST_Difference`/join operand.** At Chile scale the union can hold millions of vertices; using it as an operand against every fid individually made GEOS pay that cost on every row and OOM'd outright (confirmed during development of `_05_merge.py`). Use a bbox-prefiltered join against nearby originals instead (see `_05_merge.py`'s `_05_tmp1`/`_05_tmp2`, which explodes multipolygon fids into parts first — a whole-fid bbox can span mainland-to-remote-island and defeat the prefilter). **`_02_lines.py`'s neighbor-union self-join deliberately does NOT do this** — it joins on whole-fid bboxes. Exploding it into per-part bboxes looks like the same fix but isn't: it helps files with many fids that each have a few widely-scattered parts (e.g. `idn_admin3`) but badly regresses files with one fid made of thousands of tightly-clustered parts (e.g. `chl_admin3` has a single fid with 3,796 parts) by multiplying self-join row count far more than the tighter bboxes save — confirmed empirically (Chile: 3.3GB peak with whole-fid bboxes vs. OOM at 10GB+ with per-part bboxes). See `docs/voronoi-memory.md`.
 - **Byte-exact preservation of original polygon vertices is not a goal.** `ST_CoverageClean` may shift any polygon's boundary, including previously-untouched ones. Don't reintroduce per-fid violator scoping, snapshot/restore, or escalation logic to protect vertex-level exactness — that machinery was removed deliberately (see `docs/topology.md`).
 - **`core.match` may import from `core.extend`; the reverse is forbidden.** Enforced by the `match-may-use-extend-not-reverse` import-linter contract in `pyproject.toml`. `match` reuses `extend`'s stage functions per-group rather than duplicating Voronoi gap-filling logic; `extend` must stay usable standalone with zero knowledge of `match`.
-- **`match`'s per-group work runs in an isolated subprocess, not `match()`'s own connection/process.** GEOS's native heap isn't fully released between files even after closing the DuckDB connection (the same finding that makes `extend()` process one file per OS process) — a many-parent-group `match()` run would hit the same failure mode in-process, just with groups substituting for files. See `docs/matching.md`.
+- **`match`'s per-group work runs in an isolated subprocess, not `match()`'s own connection/process.** GEOS's native heap isn't fully released between files even after closing the DuckDB connection (the same finding that makes `extend()` process one file per OS process) — a many-parent-group `match()` run would hit the same failure mode in-process, just with groups substituting for files. See `docs/match.md`.
 - **`core.clean` may import from `core.extend`; the reverse is forbidden.** Enforced by the `clean-may-use-extend-not-reverse` import-linter contract. `clean` reuses `extend`'s `read_and_reproject()` (inputs, without the auto-clean pre-check) and `coverage_clean()` (fix stage); `extend` must stay usable standalone with zero knowledge of `clean`.
-- **`ST_CoverageClean`'s `gap_maximum_width` has no GEOS-native auto-fill default.** Verified against upstream source (duckdb-spatial's `geos_module.cpp`, GEOS's `CoverageCleaner.h`/`.cpp`): the C++ class member is hardcoded to `0.0`, and a negative/omitted value is a no-op that leaves it there — unlike `snapping_distance`, which does have a real computed auto-default (`extent_diameter / 1e8`). `clean`'s `--gap-width all` mode computes an explicit width from the widest *detected* gap rather than relying on any GEOS-side "auto-fill." See `docs/cleaning.md`.
+- **`ST_CoverageClean`'s `gap_maximum_width` has no GEOS-native auto-fill default.** Verified against upstream source (duckdb-spatial's `geos_module.cpp`, GEOS's `CoverageCleaner.h`/`.cpp`): the C++ class member is hardcoded to `0.0`, and a negative/omitted value is a no-op that leaves it there — unlike `snapping_distance`, which does have a real computed auto-default (`extent_diameter / 1e8`). `clean`'s `--gap-width all` mode computes an explicit width from the widest *detected* gap rather than relying on any GEOS-side "auto-fill." See `docs/clean.md`.
 - **`ST_Distance(GEOMETRY, GEOMETRY)` is unreliable for two disjoint polygons at small separations** — confirmed it returns `0.0` for two clearly-separated polygons (~3cm apart) on the installed DuckDB version, while the equivalent POINT/LINESTRING pair correctly returns the true distance. Use `ST_XMin`/`ST_XMax`/`ST_YMin`/`ST_YMax` extent comparisons or `ST_MaximumInscribedCircle` instead when checking polygon disjointness/gap width.
 - **`core.change` may import from `core.extend`; the reverse is forbidden.** Enforced by the `change-may-use-extend-not-reverse` import-linter contract. `change` reuses `extend`'s `_01_inputs.main()` (both layers pre-cleaned) and `_constants.COPY_OPTS` (overlay export); it deliberately does **not** import from `core.match` even though `_02_overlap.py`'s bbox-prefiltered join mirrors `_02_assign.py`'s pattern closely — `change` stays decoupled from `match`/`clean` the same way they're decoupled from each other, duplicating the one `EQUAL_AREA_CRS` literal rather than adding a cross-tool contract for it.
 - **`change`'s classification runs in Python, not SQL.** Union-find and cardinality classification (`core/change/_03_classify.py`, ported from topo-tools-js's `classify.ts`) scale with feature count, not vertex count, so fetching every pair row into memory and classifying with plain Python dicts/sets is safe under this repo's memory model even for a large admin layer — unlike the vertex-scaled Voronoi/coverage-clean work `extend`/`clean` do. See `docs/change.md`.
@@ -354,8 +354,8 @@ gh api "repos/duckdb/duckdb-spatial/contents/docs/functions.md?ref=${DUCKDB_REF}
 ## Reference Docs
 
 - `docs/topology.md` — topology approach (ST_Node + ST_Polygonize), DuckDB spatial function reference, SPATIAL_JOIN memory reservation bug
-- `docs/matching.md` — match's largest-overlap assignment algorithm, per-group subprocess isolation rationale, the `fids=None` whole-table-clean constraint, and the check_gaps/parent-layer-gaps caveat
-- `docs/cleaning.md` — clean's gap/overlap/sliver detection approach, why slivers are detect-only, verified `ST_CoverageClean` parameter semantics (`gap_maximum_width` has no GEOS-native auto-fill default, unlike `snapping_distance`), and the issues-file schema
+- `docs/match.md` — match's largest-overlap assignment algorithm, per-group subprocess isolation rationale, the `fids=None` whole-table-clean constraint, and the check_gaps/parent-layer-gaps caveat
+- `docs/clean.md` — clean's gap/overlap/sliver detection approach, why slivers are detect-only, verified `ST_CoverageClean` parameter semantics (`gap_maximum_width` has no GEOS-native auto-fill default, unlike `snapping_distance`), and the issues-file schema
 - `docs/change.md` — change's overlap/classification algorithm, why the WASM point-sampling fallback is dropped, the identity-claim guard's purpose, the output schema, and the two-output-file design
 - `docs/performance.md` — thread-scaling benchmarks, pipeline phase profiles, `get_connection` settings, RTREE experiment
 - `docs/voronoi-memory.md` — Voronoi collinearity degeneracy fix (segment cap, dynamic resampling distance), `--memory-gb`-derived point budget fitted inside a real memory-limited Docker container, and two documented (not gated) memory ceilings in `inputs.py`/`lines.py` that genuinely exceed 4GB for large files (`phl_admin3`, `idn_admin3`)

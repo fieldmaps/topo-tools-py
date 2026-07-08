@@ -7,6 +7,44 @@ overlap/assignment algorithm, the per-group subprocess design, and the
 constraints it inherits from `extend`. See `docs/topology.md` for the
 coverage-clean/`SPATIAL_JOIN` background both tools share.
 
+## Usage
+
+```sh
+topo-tools match children.geojson parents.geojson
+```
+
+```python
+from topo_tools import match
+
+match("admin4.geojson", "admin0.geojson", "admin4_matched.geojson", memory_gb=4)
+```
+
+`OUTPUT_FILE` (positional, optional) defaults to `INPUT_FILE` with a
+`_matched` suffix.
+
+| Option | Description |
+| --- | --- |
+| `--memory-gb` | Available memory in GB; sizes point density automatically (default `4`). |
+| `--overwrite` | Overwrite an existing output file. |
+| `--threads` | DuckDB thread count. |
+| `--debug` | Keep intermediate tables, export to Parquet, log timing/memory per query. |
+| `--tmp-dir` | Intermediate DuckDB + Parquet location. |
+| `--step` | Run only one named stage: `inputs`, `assign`, `groups`, `merge`, `outputs`. |
+
+```sh
+# Fit an admin4 layer into a single country boundary
+topo-tools match adm4.geojson adm0.geojson
+
+# Fit admin3 into admin2 groups, each cleaned against its own parent
+topo-tools match adm3.gpkg adm2.gpkg adm3_matched.gpkg --memory-gb 2
+```
+
+Each parent's group of children runs in its own isolated subprocess, so a run
+with many parents (e.g. matching a nationwide admin4 layer against dozens of
+admin2 units) scales without one large group's memory use affecting another's.
+
+Run `topo-tools match --help` for the full, always-current option list.
+
 ## Pipeline
 
 1. **`_01_inputs`** — loads and coverage-cleans both layers by delegating
