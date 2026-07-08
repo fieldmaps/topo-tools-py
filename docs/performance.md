@@ -77,6 +77,45 @@ final polygons — the most expensive single query in the outputs phase.
 
 ---
 
+## Portolan-scale profiling (post-restructure)
+
+The 147-file batch run recorded in `docs/voronoi-memory.md` predates the
+`app/` → `topo_tools` package restructure (commit `76f4426`); `clean` and
+`change` both got fresh post-restructure real-data tables (see
+`docs/clean.md`, `docs/change.md`) but `extend` itself hadn't been re-run
+against real portolan data under the current code until now.
+
+`phl_admin3` (portolan `phl/latest/adm3`, 1,642 fids, 13.85M vertices —
+the same file `docs/voronoi-memory.md` documents as needing ~5.9GB in
+`_01_inputs.py`'s coverage-clean fallback path), `--memory-gb 4 --debug`,
+Apple Silicon/10 logical cores:
+
+| Stage   | Wall time | Notes                                                    |
+| ------- | --------- | --------------------------------------------------------- |
+| inputs  | 12s       | no invalid edges detected — fallback `ST_CoverageClean` did **not** trigger |
+| lines   | 39s       |                                                             |
+| attempt | 2m13s     | 13.07M raw segments needed ~11.1GB to decompose/remerge alone, exceeding the ~4GB budget before resampling — proceeded anyway with `DEFAULT_DISTANCE` per the soft-target policy, succeeded on the first attempt (no retry) |
+| merge   | 1m24s     |                                                             |
+| outputs | 1m47s     |                                                             |
+| **Total** | **6m15s** | peak RSS **4.55 GB**                                     |
+
+Output: 1,642 fids preserved, 905,538 vertices (down from 13.85M — expected,
+`extend` resamples/simplifies via the Voronoi step). Topology validation
+passed (`check_overlaps`/`check_gaps`), no correctness issues.
+
+**This run did not exercise the documented ~5.9GB ceiling** — that figure is
+specifically `_01_inputs.py`'s whole-table `ST_CoverageClean` fallback,
+which only fires when `ST_CoverageInvalidEdges_Agg` finds invalid edges;
+`phl_admin3`'s source data has none, so `inputs` took the no-op fast path.
+The 4.55GB peak measured here is the normal (no-fallback) pipeline cost for
+this file post-restructure — lower than the ~5.9GB ceiling, as expected
+since that ceiling is for a different, more expensive code path within the
+same stage. If the invalid-edge fallback ever needs re-validating
+post-restructure, it needs a file that actually trips
+`ST_CoverageInvalidEdges_Agg`, not a clean one.
+
+---
+
 ## Thread-scaling benchmarks (Chile admin3)
 
 | threads    | pipeline peak RSS | `_04_tmp2` time | `_04` time | `_02b` time | `_05` time | total time |

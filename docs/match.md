@@ -139,9 +139,30 @@ silently dropped during a debug run.
 `bdi_admin2.parquet` (119 parents) completed successfully end-to-end — 119
 subprocess spawns, zero dropped children, zero failed groups, valid output
 coverage (see verification steps in the project's implementation history).
-Colombia/Chile-scale (hundreds of parent groups) has not yet been profiled;
-if per-group spawn overhead becomes a bottleneck at that scale, that's the
-first thing to measure.
+
+**Colombia-scale profiling** (portolan `col/latest/adm3` → `col/latest/adm2`,
+`--memory-gb 4 --debug`, Apple Silicon/10 logical cores): 31,880 children
+against 1,122 parents, 1,120 of them with at least one assigned child (the
+other 2 parents had zero overlapping children — not a failure, no adm3 unit
+fell inside them). All 1,120 spawned subprocesses succeeded — zero dropped
+children, zero failed groups. Wall time 35m44s, peak RSS 5.26 GB (during the
+final whole-table `_04_merge` coverage-clean pass, exceeding the 4 GB
+`--memory-gb` soft target — same "document, don't gate" situation as
+`clean`'s Philippines run, see `docs/clean.md`). Stage breakdown:
+
+| Stage    | Wall time | Share |
+| -------- | --------- | ----- |
+| inputs   | 1m06s     | 3%    |
+| assign   | 57s       | 3%    |
+| groups   | 30m45s    | 86%   |
+| merge    | 53s       | 2%    |
+| outputs  | 2m02s     | 6%    |
+
+`groups` dominates as expected (1,120 sequential subprocess spawns, ~1.65s/
+group average including Python/DuckDB startup, the per-group `extend`
+pipeline, and teardown) but shows no cliff or superlinear blowup relative to
+Burundi's 119-group run — per-group spawn overhead is not a bottleneck at
+this scale.
 
 ## `fids=None`: whole-table coverage-clean only
 
