@@ -7,8 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Initial release (not yet cut on real PyPI, only rehearsed on TestPyPI): four
-tools, CLI + Python API for each.
+## [0.1.0] - 2026-07-10
+
+Initial release: four tools, CLI + Python API for each.
 
 - `extend` — Voronoi-based polygon boundary extension, producing a complete
   coverage layer that fills gaps.
@@ -20,4 +21,5 @@ tools, CLI + Python API for each.
   unit as unchanged/renamed/modified/relocated/split/merge/complex/created/
   removed, via spatial overlap and optional code/name identity linking.
 
-[Unreleased]: https://github.com/fieldmaps/topo-tools-py/commits/main
+[Unreleased]: https://github.com/fieldmaps/topo-tools-py/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/fieldmaps/topo-tools-py/releases/tag/v0.1.0
